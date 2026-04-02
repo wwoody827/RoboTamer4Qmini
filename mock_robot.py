@@ -1,5 +1,5 @@
 """
-Mock robot UDP broadcaster for debugging visualizer.py without a real robot.
+Mock robot UDP broadcaster for debugging visualizer_web.py without a real robot.
 
 Sends 53-float packets at 20Hz on the same port/format as RoboTamerSdk4Qmini.
 
@@ -58,8 +58,8 @@ def make_packet_walk(t: float) -> list:
         apit =  0.4  * math.sin(2 * math.pi * freq * t + phase_offset + math.pi)
         return [hyaw, hrol, hpit, knee, apit]
 
-    left  = leg(0,           t)
-    right = leg(math.pi,     t)
+    left  = leg(0,       t)
+    right = leg(math.pi, t)
 
     joint_act = left + right
     noise     = [0.01 * math.sin(t * 13.7 + i) for i in range(10)]
@@ -71,7 +71,7 @@ def make_packet_walk(t: float) -> list:
 
     roll  =  0.08 * math.sin(2 * math.pi * freq * t)
     pitch =  0.04 * math.sin(2 * math.pi * freq * t * 2)
-    yaw   =  0.005 * t % (2 * math.pi)  # slow drift
+    yaw   =  0.005 * t % (2 * math.pi)
     base_rpy      = [roll, pitch, yaw]
     base_rpy_rate = [0.08 * 2 * math.pi * freq * math.cos(2 * math.pi * freq * t),
                      0.04 * 4 * math.pi * freq * math.cos(4 * math.pi * freq * t),
@@ -86,8 +86,8 @@ def make_packet_walk(t: float) -> list:
 
 def make_packet_sin(t: float) -> list:
     """Slow sin sweep through all joints one at a time."""
-    period   = 3.0   # seconds per joint
-    amp      = 0.5
+    period    = 3.0
+    amp       = 0.5
     joint_idx = int(t / period) % 10
     phase     = (t % period) / period * 2 * math.pi
 
@@ -108,7 +108,6 @@ def make_packet_sin(t: float) -> list:
 
 
 def _rpy_to_quat(r, p, y) -> list:
-    """Convert roll/pitch/yaw to quaternion [qw, qx, qy, qz]."""
     cr, sr = math.cos(r / 2), math.sin(r / 2)
     cp, sp = math.cos(p / 2), math.sin(p / 2)
     cy, sy = math.cos(y / 2), math.sin(y / 2)
@@ -137,7 +136,7 @@ def main():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 
-    interval = 1.0 / RATE_HZ
+    interval    = 1.0 / RATE_HZ
     make_packet = MODES[args.mode]
 
     print(f"Mock robot broadcasting → {ADDR}:{args.port}  mode={args.mode}  rate={RATE_HZ}Hz")
@@ -146,7 +145,7 @@ def main():
     t0 = time.time()
     try:
         while True:
-            t = time.time() - t0
+            t      = time.time() - t0
             values = make_packet(t)
             assert len(values) == 53, f"Packet length {len(values)} != 53"
             msg = ','.join(f'{v:.6f}' for v in values)
