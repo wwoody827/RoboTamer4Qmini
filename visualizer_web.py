@@ -254,7 +254,7 @@ function applyPose(angles) {
   }
 }
 function applyBaseRPY(rpy) {
-  baseOrientNode.rotation.set(rpy[0], rpy[1], rpy[2], 'XYZ');
+  baseOrientNode.rotation.set(rpy[1], rpy[0], rpy[2], 'XYZ');
 }
 
 // Apply default stand pose immediately
