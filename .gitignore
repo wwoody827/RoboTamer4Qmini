@@ -1,0 +1,13 @@
+# Training experiments (weights, logs)
+experiments/
+
+# Isaac Gym (extracted package)
+isaacgym/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Package
+IsaacGym_Preview_3_Package.tar.gz
