@@ -121,6 +121,9 @@ def get_args():
         {"name": "--debug", "action": "store_true", "default": False, "help": "save data to excel"},
         {"name": "--mode", "type": str, "action": "store_true", "default": 'reset',
          "help": "Test mode. Overrides config file if provided."},
+        {"name": "--cmd_vx", "type": float, "default": None, "help": "Fix forward velocity command (m/s)."},
+        {"name": "--cmd_yaw", "type": float, "default": None, "help": "Fix yaw rate command (rad/s)."},
+        {"name": "--out", "type": str, "default": None, "help": "Output video filename (without extension)."},
 
     ]
     # parse arguments

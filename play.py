@@ -115,6 +115,10 @@ def play(args):
     for epoch in range(args.epochs):
         print(f'#The `{epoch + 1}st/(total {args.epochs} times)` rollout......................................')
 
+        if args.cmd_vx is not None:
+            gym_env.task.fixed_commands[0] = args.cmd_vx
+        if args.cmd_yaw is not None:
+            gym_env.task.fixed_commands[2] = args.cmd_yaw
         obs, cri_obs = gym_env.reset(torch.arange(env.num_envs, device=device).detach())
         obs,cri_obs = obs.type(torch.float32), cri_obs.type(torch.float32)
         for i in range(int(args.time / (cfg.sim.dt * cfg.pd_gains.decimation))):
@@ -218,7 +222,8 @@ def play(args):
         if args.video:
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # low quality mp4
             cap_fps = int(1 / (cfg.sim.dt * cfg.pd_gains.decimation))
-            video_path = join(debug_dir, f'{args.name}.mp4')
+            video_name = args.out if args.out is not None else args.name
+            video_path = join(debug_dir, f'{video_name}.mp4')
             videoWriter = cv2.VideoWriter(video_path, fourcc, cap_fps, (1600, 900))
             file_lst = os.listdir(pic_folder)
             file_lst.sort(key=lambda x: int(x[:-4]))

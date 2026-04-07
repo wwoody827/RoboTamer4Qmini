@@ -33,6 +33,7 @@ class BaseTask(NullTask):
         self.static_flag = torch.where(torch.norm(self.commands[:, :3], dim=1, keepdim=True) < 0.15, False,
                                        True).float()
         self.zero_command_env_ids = (torch.norm(self.commands[:, :3], dim=1, keepdim=True) < 0.15).nonzero(as_tuple=False)[:, [0]].flatten()
+        self.fixed_commands = {}  # set by play.py to lock specific command dims
         self._resample_commands(torch.arange(env.num_envs, device=self.device))
 
         if self.cfg.domain_rand.delay_observation:
@@ -272,7 +273,11 @@ class BaseTask(NullTask):
             heading = torch.atan2(forward[:, 1], forward[:, 0])
             self.commands[:, 2] = torch.clip(0.5 * wrap_to_pi(self.commands[:, 3] - heading), -1., 1.)
 
-        self.commands[:96, [0, 2]] = 0
+        if not self.fixed_commands:
+            self.commands[:96, [0, 2]] = 0
+
+        for dim, val in self.fixed_commands.items():
+            self.commands[:, dim] = val
 
         self.static_flag[env_ids] = torch.where(torch.norm(self.commands[env_ids, :3], dim=1, keepdim=True) < 0.15,False, True).float()
         self.commands[env_ids, :3] *= self.static_flag[env_ids]
