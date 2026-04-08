@@ -97,7 +97,7 @@ def scale_transform(action, low, high, clip_val=1.0):
 # MuJoCo scene builder
 # ---------------------------------------------------------------------------
 
-def build_mujoco_model(urdf_path, sim_dt, init_height=0.5):
+def build_mujoco_model(urdf_path, sim_dt, init_height=0.5, floor_friction=1.0, floor_aniso=False):
     """
     Load robot from URDF via MjSpec, add a floor and actuators, return compiled model.
     Requires MuJoCo >= 3.0.
@@ -135,7 +135,13 @@ def build_mujoco_model(urdf_path, sim_dt, init_height=0.5):
     floor.type     = mujoco.mjtGeom.mjGEOM_PLANE
     floor.size     = np.array([100.0, 100.0, 0.01])
     floor.rgba     = np.array([0.6, 0.6, 0.6, 1.0])
-    floor.friction = np.array([1.0, 0.005, 0.001])
+    if floor_aniso:
+        # Anisotropic friction (carpet): high resistance backward (X-), low forward (X+)
+        # condim=4 enables separate friction in two sliding directions
+        floor.friction = np.array([floor_friction, floor_friction * 0.2, 0.001])
+        floor.condim = 4
+    else:
+        floor.friction = np.array([floor_friction, 0.005, 0.001])
 
     # Lighting
     light     = spec.worldbody.add_light()
@@ -221,7 +227,9 @@ def run(cfg, cmd_vx=None, cmd_yaw=None, duration=None, headless=False):
 
     # Build MuJoCo model
     print(f"Building MuJoCo scene from: {cfg['urdf_path']}")
-    model = build_mujoco_model(cfg['urdf_path'], sim_dt, cfg['init_height'])
+    model = build_mujoco_model(cfg['urdf_path'], sim_dt, cfg['init_height'],
+                               floor_friction=cfg.get('floor_friction', 1.0),
+                               floor_aniso=cfg.get('floor_aniso', False))
     data  = mujoco.MjData(model)
 
     # Print joint order (useful for debugging)
@@ -383,11 +391,17 @@ def main():
     parser.add_argument('--cmd_yaw',  type=float, default=None, help='Yaw rate (rad/s)')
     parser.add_argument('--duration', type=float, default=None, help='Duration (s)')
     parser.add_argument('--headless', action='store_true', help='Run without viewer, print state to stdout')
+    parser.add_argument('--floor_friction', type=float, default=None, help='Floor sliding friction (default 1.0, carpet ~3.0)')
+    parser.add_argument('--floor_aniso', action='store_true', help='Anisotropic floor friction (carpet-like)')
     args = parser.parse_args()
 
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
 
+    if args.floor_friction is not None:
+        cfg['floor_friction'] = args.floor_friction
+    if args.floor_aniso:
+        cfg['floor_aniso'] = True
     run(cfg, cmd_vx=args.cmd_vx, cmd_yaw=args.cmd_yaw, duration=args.duration, headless=args.headless)
 
 

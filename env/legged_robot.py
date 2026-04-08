@@ -345,13 +345,15 @@ class LeggedRobotEnv:
                 bucket_ids = torch.randint(0, num_buckets, (self.num_envs, 1))
                 self.friction_coeffs = torch_rand_float(friction_range[0], friction_range[1], (self.num_envs, 1),device='cpu')
                 self.restitution_coeffs = torch_rand_float(0., 0.1, (self.num_envs, 1), device='cpu')
-                # self.friction_coeffs = friction_buckets[bucket_ids]
+                # randomize rest_offset to simulate soft surfaces (carpet, foam, etc.)
+                # negative values mean the foot "sinks into" the surface before contact is registered
+                rest_offset_range = self.cfg.domain_rand.rest_offset_range
+                self.rest_offset_vals = torch_rand_float(rest_offset_range[0], rest_offset_range[1], (self.num_envs, 1), device='cpu')
 
             for s in range(len(props)):
                 props[s].friction = self.friction_coeffs[env_id]
                 props[s].restitution = self.restitution_coeffs[env_id]
-                # print("props[s].friction", s, props[s].friction)
-                # print("props[s].restitution", s, props[s].restitution)
+                props[s].rest_offset = float(self.rest_offset_vals[env_id])
 
         return props
 
