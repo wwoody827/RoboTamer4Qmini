@@ -222,7 +222,11 @@ def play(args):
         if args.video:
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # low quality mp4
             cap_fps = int(1 / (cfg.sim.dt * cfg.pd_gains.decimation))
-            video_name = args.out if args.out is not None else args.name
+            ckpt_tag = f'iter{args.iter}' if args.iter is not None else 'latest'
+            vx_tag = f'vx{args.cmd_vx}' if args.cmd_vx is not None else 'vxfree'
+            yaw_tag = f'yaw{args.cmd_yaw}' if args.cmd_yaw is not None else 'yawfree'
+            auto_suffix = f'_{ckpt_tag}_{vx_tag}_{yaw_tag}'
+            video_name = (args.out if args.out is not None else args.name) + auto_suffix
             video_path = join(debug_dir, f'{video_name}.mp4')
             videoWriter = cv2.VideoWriter(video_path, fourcc, cap_fps, (1600, 900))
             file_lst = os.listdir(pic_folder)

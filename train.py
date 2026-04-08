@@ -88,9 +88,13 @@ def train():
     cur_episode_length = torch.zeros(cfg.runner.num_envs, dtype=torch.float, device=device)
 
     obs, cri_obs = gym_env.reset(torch.arange(cfg.runner.num_envs, device=device))
+    rew_component_acc = None
+    rew_component_steps = 0
     for it in range(current_learning_iteration, total_iteration):
 
         start = time.time()
+        rew_component_acc = None
+        rew_component_steps = 0
         for i in range(num_steps_per_env):
             act = alg.act(obs, cri_obs)
             obs, cri_obs, rew, done, info, eval_rew = gym_env.step(act,it)
@@ -98,6 +102,13 @@ def train():
             cur_reward_sum += rew
             cur_task_rew_sum+=eval_rew
             cur_episode_length += 1
+            if hasattr(gym_env.task, '_last_rew_components') and gym_env.task._last_rew_components is not None:
+                step_mean = gym_env.task._last_rew_components.mean(dim=0).detach()
+                if rew_component_acc is None:
+                    rew_component_acc = step_mean
+                else:
+                    rew_component_acc += step_mean
+                rew_component_steps += 1
             reset_env_ids = (done > 0).nonzero(as_tuple=False)[:, [0]].flatten()
             if len(reset_env_ids) > 0:
                 rew_buffer.extend(cur_reward_sum[reset_env_ids].cpu().numpy().tolist())
@@ -153,6 +164,11 @@ def train():
         writer.add_scalar('3:Perf/total_fps', fps, it)
         writer.add_scalar('3:Perf/collection_time', collection_time, it)
         writer.add_scalar('3:Perf/learning_time', learn_time, it)
+
+        if rew_component_acc is not None and rew_component_steps > 0 and gym_env.task.rew_names is not None:
+            rew_component_mean = rew_component_acc / rew_component_steps
+            for name, val in zip(gym_env.task.rew_names, rew_component_mean.cpu().tolist()):
+                writer.add_scalar(f'4:Rewards/{name}', val, it)
 
         print(f"{args.name}#{it}:",
               f"{'t'} {total_time / 60:.1f}m({iteration_time:.1f}s)",

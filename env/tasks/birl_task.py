@@ -426,8 +426,11 @@ class BIRLTask(BaseTask):
         if self.debug:
             self.rew_names = [name for name in rew_dict.keys()]
             self.debug = None
+        if self.rew_names is None:
+            self.rew_names = list(rew_dict.keys())
         rewards = torch.cat(
             [torch.clip(value.to(self.device), min=-4., max=5.) * self.env.dt for value in rew_dict.values()], dim=1)
+        self._last_rew_components = rewards.detach()
         eval_rew = torch.cat([rew_dict[key] * self.env.dt for key in
                               ['fwd_vel', 'yaw_rat', 'ang_vel', 'lateral_vel', 'vertical_vel', 'twist']],
                              dim=1).sum(dim=1)
