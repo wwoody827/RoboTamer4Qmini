@@ -11,7 +11,6 @@ Usage:
 """
 
 import os
-import sys
 import argparse
 import time
 from collections import deque
@@ -61,10 +60,15 @@ def quat_to_euler_xyz(q_wxyz):
     # pitch
     sinp = np.clip(2.0 * (w * y - z * x), -1.0, 1.0)
     pitch = np.arcsin(sinp)
+    # yaw
+    siny = 2.0 * (w * z + x * y)
+    cosy = w*w + x*x - y*y - z*z
+    yaw = np.arctan2(siny, cosy)
     # wrap to [-pi, pi]
     roll  = roll  - 2 * np.pi * np.floor((roll  + np.pi) / (2 * np.pi))
     pitch = pitch - 2 * np.pi * np.floor((pitch + np.pi) / (2 * np.pi))
-    return np.array([roll, pitch], dtype=np.float32)
+    yaw   = yaw   - 2 * np.pi * np.floor((yaw   + np.pi) / (2 * np.pi))
+    return np.array([roll, pitch, yaw], dtype=np.float32)
 
 
 def quat_rotate_inverse(q_wxyz, vec):
@@ -131,7 +135,7 @@ def build_mujoco_model(urdf_path, sim_dt, init_height=0.5):
     floor.type     = mujoco.mjtGeom.mjGEOM_PLANE
     floor.size     = np.array([100.0, 100.0, 0.01])
     floor.rgba     = np.array([0.6, 0.6, 0.6, 1.0])
-    floor.friction = np.array([0.8, 0.005, 0.001])
+    floor.friction = np.array([1.0, 0.005, 0.001])
 
     # Lighting
     light     = spec.worldbody.add_light()
@@ -182,7 +186,7 @@ def build_mujoco_model(urdf_path, sim_dt, init_height=0.5):
 # Main sim2sim loop
 # ---------------------------------------------------------------------------
 
-def run(cfg, cmd_vx=None, cmd_yaw=None, duration=None):
+def run(cfg, cmd_vx=None, cmd_yaw=None, duration=None, headless=False):
     # Override commands if provided
     cmd_vx  = cmd_vx  if cmd_vx  is not None else cfg['cmd_vx']
     cmd_yaw = cmd_yaw if cmd_yaw is not None else cfg['cmd_yaw']
@@ -263,7 +267,8 @@ def run(cfg, cmd_vx=None, cmd_yaw=None, duration=None):
             quat         = data.qpos[3:7]
             world_angvel = data.qvel[3:6]
 
-        base_euler   = quat_to_euler_xyz(quat)
+        euler        = quat_to_euler_xyz(quat)   # [roll, pitch, yaw]
+        base_euler   = euler[:2]               # obs only uses roll, pitch
         base_ang_vel = quat_rotate_inverse(quat, world_angvel)
 
         joint_pos_rel = q - ref_joint                              # relative to ref
@@ -307,57 +312,63 @@ def run(cfg, cmd_vx=None, cmd_yaw=None, duration=None):
 
     step = 0
     total_steps = int(duration / sim_dt)
+    log_interval = int(1.0 / sim_dt)  # print every 1 simulated second
 
-    with mujoco.viewer.launch_passive(model, data) as viewer:
-        viewer.cam.azimuth   = 90
-        viewer.cam.elevation = -20
-        viewer.cam.distance  = 3.0
+    print(f"\nRunning sim2sim: cmd_vx={cmd_vx:.2f} m/s, cmd_yaw={cmd_yaw:.2f} rad/s")
+    print(f"Duration: {duration:.1f}s  |  Policy @ {1/policy_dt:.0f}Hz  |  Physics @ {1/sim_dt:.0f}Hz")
+    print(f"{'time':>6}  {'x':>7}  {'y':>7}  {'z':>7}  {'roll':>7}  {'pitch':>7}  {'yaw':>7}  {'vx':>7}  {'vy':>7}")
 
-        print(f"\nRunning sim2sim: cmd_vx={cmd_vx:.2f} m/s, cmd_yaw={cmd_yaw:.2f} rad/s")
-        print(f"Duration: {duration:.1f}s  |  Policy @ {1/policy_dt:.0f}Hz  |  Physics @ {1/sim_dt:.0f}Hz\n")
+    def _physics_step():
+        nonlocal step, static_flag
+        if step % decimation == 0:
+            obs_now = get_obs()
+            obs_history.append(obs_now)
+            obs_stacked = np.concatenate(list(obs_history))[np.newaxis, :]
 
-        wall_start = time.time()
+            net_out = session.run(None, {input_name: obs_stacked})[0][0]
+            scaled = scale_transform(net_out, act_low, act_high)
+            pm.compute(scaled[:num_legs])
+            current_joint_act[:] += scaled[num_legs:] * policy_dt
+            current_joint_act[:] = np.clip(current_joint_act, jlim_low, jlim_high)
+            static_flag = float(np.linalg.norm(commands) >= static_thr)
 
-        while viewer.is_running() and step < total_steps:
-            # Policy step (every `decimation` physics steps)
-            if step % decimation == 0:
-                obs_now = get_obs()
-                obs_history.append(obs_now)
-                obs_stacked = np.concatenate(list(obs_history))[np.newaxis, :]  # [1, 129]
+        q  = data.qpos[QPOS_START:QPOS_START + NUM_JOINTS]
+        dq = data.qvel[QVEL_START:QVEL_START + NUM_JOINTS]
+        torques = compute_torques(current_joint_act, q, dq)
+        data.ctrl[:NUM_JOINTS] = torques
+        mujoco.mj_step(model, data)
+        step += 1
 
-                # Run policy
-                net_out = session.run(None, {input_name: obs_stacked})[0][0]  # [12]
+        if step % log_interval == 0:
+            t = step * sim_dt
+            x, y, z = data.qpos[0], data.qpos[1], data.qpos[2]
+            # freejoint qpos: [x,y,z, w,x,y,z] — use xquat which is always [w,x,y,z]
+            quat = data.xquat[imu_body_id]  # [w,x,y,z]
+            euler = quat_to_euler_xyz(quat)
+            vx = data.qvel[0]
+            vy = data.qvel[1]
+            print(f"{t:6.1f}  {x:7.3f}  {y:7.3f}  {z:7.3f}  "
+                  f"{np.degrees(euler[0]):7.2f}  {np.degrees(euler[1]):7.2f}  "
+                  f"{np.degrees(euler[2]):7.2f}  "
+                  f"{vx:7.3f}  {vy:7.3f}")
 
-                # Scale action: [-1,1] → [inc_low, inc_high]
-                scaled = scale_transform(net_out, act_low, act_high)
-
-                # Update phase modulator with first num_legs outputs
-                pm.compute(scaled[:num_legs])
-
-                # Update joint targets with remaining outputs (increment mode)
-                current_joint_act[:] += scaled[num_legs:] * policy_dt
-                current_joint_act[:] = np.clip(current_joint_act, jlim_low, jlim_high)
-
-                # Update static flag
-                static_flag = float(np.linalg.norm(commands) >= static_thr)
-
-            # Compute and apply torques
-            q  = data.qpos[QPOS_START:QPOS_START + NUM_JOINTS]
-            dq = data.qvel[QVEL_START:QVEL_START + NUM_JOINTS]
-            torques = compute_torques(current_joint_act, q, dq)
-            data.ctrl[:NUM_JOINTS] = torques
-
-            # Physics step
-            mujoco.mj_step(model, data)
-            step += 1
-
-            # Real-time sync
-            viewer.sync()
-            elapsed = time.time() - wall_start
-            target  = step * sim_dt
-            if target > elapsed:
-                time.sleep(target - elapsed)
-
+    if headless:
+        while step < total_steps:
+            _physics_step()
+        print(f"\nSim2Sim finished: {step * sim_dt:.1f}s simulated.")
+    else:
+        with mujoco.viewer.launch_passive(model, data) as viewer:
+            viewer.cam.azimuth   = 90
+            viewer.cam.elevation = -20
+            viewer.cam.distance  = 3.0
+            wall_start = time.time()
+            while viewer.is_running() and step < total_steps:
+                _physics_step()
+                viewer.sync()
+                elapsed = time.time() - wall_start
+                target  = step * sim_dt
+                if target > elapsed:
+                    time.sleep(target - elapsed)
         print(f"Sim2Sim finished: {step * sim_dt:.1f}s simulated.")
 
 
@@ -371,12 +382,13 @@ def main():
     parser.add_argument('--cmd_vx',   type=float, default=None, help='Forward velocity (m/s)')
     parser.add_argument('--cmd_yaw',  type=float, default=None, help='Yaw rate (rad/s)')
     parser.add_argument('--duration', type=float, default=None, help='Duration (s)')
+    parser.add_argument('--headless', action='store_true', help='Run without viewer, print state to stdout')
     args = parser.parse_args()
 
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
 
-    run(cfg, cmd_vx=args.cmd_vx, cmd_yaw=args.cmd_yaw, duration=args.duration)
+    run(cfg, cmd_vx=args.cmd_vx, cmd_yaw=args.cmd_yaw, duration=args.duration, headless=args.headless)
 
 
 if __name__ == '__main__':
