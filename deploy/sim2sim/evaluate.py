@@ -2,13 +2,15 @@
 Policy evaluation across multiple conditions.
 
 Runs sim2sim headlessly over a test matrix (friction × cmd_vx × cmd_yaw),
-each condition repeated N times, and outputs a CSV summary.
+each condition repeated N times, outputs a CSV summary, and prints a
+breakdown report with optional matplotlib plots.
 
 Usage:
     python deploy/sim2sim/evaluate.py [--config deploy/sim2sim/configs/qmini_birl.yaml]
                                       [--runs 10]
                                       [--duration 10]
                                       [--out experiments/my_run/eval.csv]
+                                      [--no-plots]
 """
 
 import os
@@ -16,8 +18,8 @@ import sys
 import argparse
 import itertools
 import csv
+import math
 from collections import deque
-from math import tau
 
 import numpy as np
 import mujoco
@@ -32,11 +34,19 @@ from sim2sim import (
 
 import onnxruntime as ort
 
+try:
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    HAS_MPL = True
+except ImportError:
+    HAS_MPL = False
+
+
+# ── episode runner ────────────────────────────────────────────────────────────
 
 def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None):
-    """
-    Run one episode. Returns a dict of scalar metrics.
-    """
+    """Run one episode. Returns a dict of scalar metrics."""
     if seed is not None:
         np.random.seed(seed)
 
@@ -74,7 +84,6 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None):
     imu_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, 'imu_in_torso')
 
     mujoco.mj_resetData(model, data)
-    # randomize initial phase slightly for varied episodes
     data.qpos[QPOS_START:QPOS_START + NUM_JOINTS] = ref_joint
     mujoco.mj_forward(model, data)
 
@@ -110,17 +119,16 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None):
         error = target_q - q
         return kps * error + kds - dq + tor_offset - 3.5 * np.sign(dq) * vel_sign
 
-    total_steps  = int(duration / sim_dt)
-    fall_thresh  = 0.25   # z below this = fallen
+    total_steps = int(duration / sim_dt)
+    fall_thresh = 0.25
 
-    # accumulators
-    vx_errors   = []
-    vy_abs      = []
+    vx_errors    = []
+    vy_abs       = []
     roll_rms_acc = []
-    pitch_rms_acc = []
-    torque_acc  = []
-    survived    = True
-    survive_steps = total_steps
+    pitch_rms_acc= []
+    torque_acc   = []
+    survived     = True
+    survive_steps= total_steps
 
     for step in range(total_steps):
         if step % decimation == 0:
@@ -146,7 +154,6 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None):
             survive_steps = step
             break
 
-        # log every policy step
         if step % decimation == 0:
             vx_errors.append(abs(data.qvel[0] - cmd_vx))
             vy_abs.append(abs(data.qvel[1]))
@@ -154,14 +161,12 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None):
             euler = quat_to_euler_xyz(quat)
             roll_rms_acc.append(euler[0] ** 2)
             pitch_rms_acc.append(euler[1] ** 2)
-            torque_acc.append(np.sum(np.abs(torques * dq)))  # power proxy
+            torque_acc.append(np.sum(np.abs(torques * dq)))
 
-    # final position
     x_final = data.qpos[0]
     y_final = data.qpos[1]
 
-    # CoT: sum(|τ·dq|) / (mg * |Δx|), only meaningful when moving
-    total_mass = 7.0   # kg (approximate)
+    total_mass = 7.0
     g = 9.81
     dx = abs(x_final)
     cot = (np.sum(torque_acc) * policy_dt) / (total_mass * g * dx) if dx > 0.05 else float('nan')
@@ -178,6 +183,8 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None):
         'cot':            cot,
     }
 
+
+# ── evaluation loop ───────────────────────────────────────────────────────────
 
 def evaluate(cfg, runs, duration, frictions, vx_list, yaw_list, out_path):
     conditions = list(itertools.product(frictions, vx_list, yaw_list))
@@ -208,7 +215,6 @@ def evaluate(cfg, runs, duration, frictions, vx_list, yaw_list, out_path):
                 results.append(metrics)
                 done += 1
 
-            # print per-condition summary
             surv_rate = np.mean([r['survived'] for r in results])
             vx_err    = np.nanmean([r['vx_error_mean'] for r in results])
             vy_drift  = np.nanmean([r['vy_abs_mean'] for r in results])
@@ -219,7 +225,194 @@ def evaluate(cfg, runs, duration, frictions, vx_list, yaw_list, out_path):
                   f"[{done}/{total}]")
 
     print(f"\nResults saved to: {out_path}")
+    return out_path
 
+
+# ── report ────────────────────────────────────────────────────────────────────
+
+def _bar(value, lo, hi, width=20):
+    frac = max(0., min(1., (value - lo) / (hi - lo + 1e-9)))
+    filled = round(frac * width)
+    return '[' + '#' * filled + '.' * (width - filled) + ']'
+
+
+def print_report(csv_path):
+    try:
+        import pandas as pd
+    except ImportError:
+        print('[report] pandas not available — skipping breakdown report')
+        return
+
+    df = pd.read_csv(csv_path)
+    frictions = sorted(df['friction'].unique())
+    vx_vals   = sorted(df['cmd_vx'].unique())
+
+    sep = '+----------+---------+-----+---------+----------+-----------+-----------+------------+----------+'
+    hdr = ('| friction | cmd_vx  |  N  |  Surv%  |  vx_err  |  vy_drift |  roll°rms |  pitch°rms |   CoT    |')
+
+    print('\n' + '=' * len(sep))
+    print(' Breakdown Report')
+    print('=' * len(sep))
+    print(sep)
+    print(hdr)
+    print(sep)
+
+    for fr in frictions:
+        for vx in vx_vals:
+            sub = df[(df['friction'] == fr) & (df['cmd_vx'] == vx)]
+            if sub.empty:
+                continue
+            n     = len(sub)
+            surv  = sub['survived'].mean() * 100
+            vxe   = sub['vx_error_mean'].mean()
+            vy    = sub['vy_abs_mean'].mean()
+            roll  = math.degrees(sub['roll_rms'].mean())
+            pitch = math.degrees(sub['pitch_rms'].mean())
+            cot   = sub['cot'].mean()
+            cot_s = f'{cot:.2f}' if not math.isnan(cot) else ' nan'
+            flag  = ' ' if surv == 100 else ('!' if surv >= 50 else 'X')
+            print(f'| {fr:^8.1f} | {vx:^+7.1f} | {n:^3} |'
+                  f' {flag}{surv:5.0f}% |'
+                  f'  {vxe:6.3f}  |'
+                  f'   {vy:6.3f}  |'
+                  f'   {roll:6.1f}   |'
+                  f'   {pitch:7.1f}   |'
+                  f' {cot_s:^8} |')
+        print(sep)
+
+    # ASCII bar summaries
+    print('\n── Survival rate by friction ──')
+    for fr in frictions:
+        rate = df[df['friction'] == fr]['survived'].mean()
+        print(f'  {fr:.1f}  {_bar(rate, 0, 1)}  {rate*100:5.1f}%')
+
+    sub_ok = df[(df['friction'] <= 1.5) & (df['survived'] == 1)]
+
+    print('\n── vx tracking error (friction≤1.5, survived) ──')
+    for vx in vx_vals:
+        s = sub_ok[sub_ok['cmd_vx'] == vx]
+        if s.empty:
+            continue
+        mu, std = s['vx_error_mean'].mean(), s['vx_error_mean'].std()
+        print(f'  {vx:+.1f}  {_bar(mu, 0, 0.7)}  {mu:.3f} ± {std:.3f} m/s')
+
+    print('\n── lateral drift vy (friction≤1.5, survived) ──')
+    for vx in vx_vals:
+        s = sub_ok[sub_ok['cmd_vx'] == vx]
+        if s.empty:
+            continue
+        mu, std = s['vy_abs_mean'].mean(), s['vy_abs_mean'].std()
+        print(f'  {vx:+.1f}  {_bar(mu, 0, 0.5)}  {mu:.3f} ± {std:.3f} m/s')
+
+
+def make_plots(csv_path):
+    if not HAS_MPL:
+        print('[report] matplotlib not available — skipping plots')
+        return
+    try:
+        import pandas as pd
+    except ImportError:
+        print('[report] pandas not available — skipping plots')
+        return
+
+    df = pd.read_csv(csv_path)
+    frictions = sorted(df['friction'].unique())
+    vx_vals   = sorted(df['cmd_vx'].unique())
+    out_dir   = os.path.dirname(os.path.abspath(csv_path))
+
+    # 1. Heatmaps
+    fig, axes = plt.subplots(2, 2, figsize=(12, 9))
+    fig.suptitle('Policy Evaluation Heatmaps  (rows=friction, cols=cmd_vx)', fontsize=13)
+
+    specs = [
+        ('survived',      'Survival rate (%)',  True,  plt.cm.RdYlGn),
+        ('vx_error_mean', 'vx tracking err',    False, plt.cm.RdYlGn_r),
+        ('vy_abs_mean',   'lateral drift (m/s)',False, plt.cm.RdYlGn_r),
+        ('roll_rms',      'roll RMS (deg)',      False, plt.cm.RdYlGn_r),
+    ]
+    for ax, (col, title, pct, cmap) in zip(axes.flat, specs):
+        mat = np.full((len(frictions), len(vx_vals)), np.nan)
+        for i, fr in enumerate(frictions):
+            for j, vx in enumerate(vx_vals):
+                sub = df[(df['friction'] == fr) & (df['cmd_vx'] == vx)]
+                if sub.empty:
+                    continue
+                v = sub[col].mean()
+                if col in ('roll_rms', 'pitch_rms'):
+                    v = math.degrees(v)
+                if pct:
+                    v *= 100
+                mat[i, j] = v
+        im = ax.imshow(mat, cmap=cmap, aspect='auto', vmin=0,
+                       vmax=(100 if pct else None))
+        ax.set_xticks(range(len(vx_vals)))
+        ax.set_xticklabels([f'{v:+.1f}' for v in vx_vals])
+        ax.set_yticks(range(len(frictions)))
+        ax.set_yticklabels([f'{f:.1f}' for f in frictions])
+        ax.set_xlabel('cmd_vx (m/s)')
+        ax.set_ylabel('friction')
+        ax.set_title(title)
+        plt.colorbar(im, ax=ax)
+        for i in range(len(frictions)):
+            for j in range(len(vx_vals)):
+                v = mat[i, j]
+                if not math.isnan(v):
+                    ax.text(j, i, f'{v:.1f}', ha='center', va='center',
+                            fontsize=8, color='black')
+    plt.tight_layout()
+    p = os.path.join(out_dir, 'eval_heatmaps.png')
+    plt.savefig(p, dpi=120); plt.close()
+    print(f'  saved: {p}')
+
+    # 2. Grouped bar: vx_err and vy_drift
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    fig.suptitle('Velocity tracking & lateral drift (survived)', fontsize=12)
+    for ax, (col, ylabel) in zip(axes, [('vx_error_mean', 'vx error (m/s)'),
+                                         ('vy_abs_mean',   'vy drift (m/s)')]):
+        x = np.arange(len(vx_vals))
+        width = 0.8 / len(frictions)
+        for k, fr in enumerate(frictions):
+            means, stds = [], []
+            for vx in vx_vals:
+                s = df[(df['friction'] == fr) & (df['cmd_vx'] == vx) & (df['survived'] == 1)]
+                means.append(s[col].mean() if not s.empty else np.nan)
+                stds.append(s[col].std()   if not s.empty else np.nan)
+            off = (k - len(frictions) / 2 + 0.5) * width
+            ax.bar(x + off, means, width, yerr=stds, label=f'fr={fr:.1f}',
+                   capsize=3, alpha=0.8)
+        ax.set_xticks(x)
+        ax.set_xticklabels([f'{v:+.1f}' for v in vx_vals])
+        ax.set_xlabel('cmd_vx (m/s)')
+        ax.set_ylabel(ylabel)
+        ax.legend(fontsize=8)
+        ax.grid(axis='y', alpha=0.4)
+    plt.tight_layout()
+    p = os.path.join(out_dir, 'eval_tracking_bars.png')
+    plt.savefig(p, dpi=120); plt.close()
+    print(f'  saved: {p}')
+
+    # 3. Histograms (friction≤1.5, forward, survived)
+    fig, axes = plt.subplots(1, 3, figsize=(13, 4))
+    fig.suptitle('Metric distributions (friction≤1.5, vx>0, survived)', fontsize=11)
+    sub_ok = df[(df['friction'] <= 1.5) & (df['cmd_vx'] > 0) & (df['survived'] == 1)]
+    for ax, (col, xlabel) in zip(axes, [('vx_error_mean', 'vx error (m/s)'),
+                                         ('vy_abs_mean',   'vy drift (m/s)'),
+                                         ('roll_rms',      'roll RMS (rad)')]):
+        data = sub_ok[col].dropna()
+        ax.hist(data, bins=20, edgecolor='white', alpha=0.85, color='steelblue')
+        ax.axvline(data.mean(), color='red', linestyle='--', linewidth=1.5,
+                   label=f'mean={data.mean():.3f}')
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel('count')
+        ax.legend(fontsize=8)
+        ax.grid(alpha=0.3)
+    plt.tight_layout()
+    p = os.path.join(out_dir, 'eval_histograms.png')
+    plt.savefig(p, dpi=120); plt.close()
+    print(f'  saved: {p}')
+
+
+# ── main ──────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser()
@@ -227,7 +420,16 @@ def main():
     parser.add_argument('--runs',     type=int,   default=10,   help='Runs per condition')
     parser.add_argument('--duration', type=float, default=10.0, help='Seconds per episode')
     parser.add_argument('--out',      default=None, help='Output CSV path')
+    parser.add_argument('--no-plots', action='store_true', help='Skip matplotlib plots')
+    parser.add_argument('--report-only', default=None, metavar='CSV',
+                        help='Skip evaluation; print report for existing CSV')
     args = parser.parse_args()
+
+    if args.report_only:
+        print_report(args.report_only)
+        if not args.no_plots:
+            make_plots(args.report_only)
+        return
 
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
@@ -236,12 +438,16 @@ def main():
         policy_dir = os.path.dirname(cfg['policy_path'])
         args.out = os.path.join(policy_dir, 'eval.csv')
 
-    # Test matrix
     frictions = [0.5, 1.0, 1.5, 3.0]
     vx_list   = [-0.3, 0.0, 0.3, 0.5, 0.7]
     yaw_list  = [0.0]
 
-    evaluate(cfg, args.runs, args.duration, frictions, vx_list, yaw_list, args.out)
+    csv_path = evaluate(cfg, args.runs, args.duration, frictions, vx_list, yaw_list, args.out)
+
+    print_report(csv_path)
+    if not args.no_plots:
+        print(f'\nGenerating plots → {os.path.dirname(os.path.abspath(csv_path))}')
+        make_plots(csv_path)
 
 
 if __name__ == '__main__':
