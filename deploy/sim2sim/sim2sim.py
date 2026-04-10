@@ -391,6 +391,7 @@ def main():
     parser.add_argument('--cmd_yaw',  type=float, default=None, help='Yaw rate (rad/s)')
     parser.add_argument('--duration', type=float, default=None, help='Duration (s)')
     parser.add_argument('--headless', action='store_true', help='Run without viewer, print state to stdout')
+    parser.add_argument('--policy',   type=str,   default=None, help='Path to .onnx policy (overrides config)')
     parser.add_argument('--floor_friction', type=float, default=None, help='Floor sliding friction (default 1.0, carpet ~3.0)')
     parser.add_argument('--floor_aniso', action='store_true', help='Anisotropic floor friction (carpet-like)')
     args = parser.parse_args()
@@ -398,6 +399,8 @@ def main():
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
 
+    if args.policy is not None:
+        cfg['policy_path'] = args.policy
     if args.floor_friction is not None:
         cfg['floor_friction'] = args.floor_friction
     if args.floor_aniso:

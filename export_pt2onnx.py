@@ -41,11 +41,15 @@ def convert(name: str, model: nn.Module, input: np.ndarray):
 
 
 policy = load_actor(class_to_dict(cfg.policy), deploy=True).eval()
-policy_path = join(model_dir, 'policy.pt')
+if args.iter is not None:
+    policy_path = join(model_dir, 'all', f'policy_{args.iter}.pt')
+else:
+    policy_path = join(model_dir, 'policy.pt')
 assert exists(policy_path), policy_path
 policy.load_state_dict(torch.load(policy_path, map_location='cpu')['actor'], strict=False)
+onnx_name = f'policy_{args.iter}' if args.iter is not None else 'policy'
 for i in range(3):
     input = torch.rand([1, cfg.policy.num_observations]).cpu().numpy()
-    convert('policy', policy, input)
+    convert(onnx_name, policy, input)
 
 

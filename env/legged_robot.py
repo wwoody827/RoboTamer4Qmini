@@ -128,6 +128,16 @@ class LeggedRobotEnv:
         self._reset_dofs(env_ids)
         self._reset_root_states(env_ids)
         self.episode_length_buf[env_ids] = 0
+        if self.cfg.domain_rand.randomize_friction and getattr(self.cfg.domain_rand, 'friction_curriculum', False):
+            fric_min = self.cfg.domain_rand.friction_range[0]
+            fric_max = getattr(self, '_friction_cur_max', self.cfg.domain_rand.friction_range[1])
+            new_coeffs = torch_rand_float(fric_min, fric_max, (len(env_ids), 1), device='cpu')
+            for i, env_id in enumerate(env_ids.tolist()):
+                self.friction_coeffs[env_id] = new_coeffs[i]
+                props = self.gym.get_actor_rigid_shape_properties(self.envs[env_id], self.actor_handles[env_id])
+                for s in range(len(props)):
+                    props[s].friction = float(new_coeffs[i])
+                self.gym.set_actor_rigid_shape_properties(self.envs[env_id], self.actor_handles[env_id], props)
         if self.cfg.domain_rand.randomize_torque:
             self.tau_gains = torch_rand_float(self.cfg.domain_rand.torque_range[0],
                                               self.cfg.domain_rand.torque_range[1], (self.num_envs, self.num_dofs),
@@ -343,7 +353,8 @@ class LeggedRobotEnv:
                 friction_range = self.cfg.domain_rand.friction_range
                 num_buckets = 64
                 bucket_ids = torch.randint(0, num_buckets, (self.num_envs, 1))
-                self.friction_coeffs = torch_rand_float(friction_range[0], friction_range[1], (self.num_envs, 1),device='cpu')
+                fric_max = getattr(self, '_friction_cur_max', friction_range[1])
+                self.friction_coeffs = torch_rand_float(friction_range[0], fric_max, (self.num_envs, 1),device='cpu')
                 self.restitution_coeffs = torch_rand_float(0., 0.1, (self.num_envs, 1), device='cpu')
                 # randomize rest_offset to simulate soft surfaces (carpet, foam, etc.)
                 # negative values mean the foot "sinks into" the surface before contact is registered
@@ -358,23 +369,16 @@ class LeggedRobotEnv:
         return props
 
     def update_friction_curriculum(self, cur_iter):
-        """Gradually increase friction max over training iterations."""
+        """Update the current friction ceiling — applied lazily on next reset."""
         if not self.cfg.domain_rand.randomize_friction:
             return
         if not getattr(self.cfg.domain_rand, 'friction_curriculum', False):
             return
-        end_iter   = self.cfg.domain_rand.friction_curriculum_end_iter
-        start_max  = self.cfg.domain_rand.friction_curriculum_start
-        full_max   = self.cfg.domain_rand.friction_range[1]
-        progress   = min(cur_iter / end_iter, 1.0)
-        cur_max    = start_max + (full_max - start_max) * progress
-        fric_min   = self.cfg.domain_rand.friction_range[0]
-        self.friction_coeffs = torch_rand_float(fric_min, cur_max, (self.num_envs, 1), device='cpu')
-        for env_id in range(self.num_envs):
-            props = self.gym.get_actor_rigid_shape_properties(self.envs[env_id], self.actor_handles[env_id])
-            for s in range(len(props)):
-                props[s].friction = float(self.friction_coeffs[env_id])
-            self.gym.set_actor_rigid_shape_properties(self.envs[env_id], self.actor_handles[env_id], props)
+        end_iter  = self.cfg.domain_rand.friction_curriculum_end_iter
+        start_max = self.cfg.domain_rand.friction_curriculum_start
+        full_max  = self.cfg.domain_rand.friction_range[1]
+        progress  = min(cur_iter / end_iter, 1.0)
+        self._friction_cur_max = start_max + (full_max - start_max) * progress
 
     def _process_rigid_body_props(self, props):
         if self.cfg.domain_rand.randomize_mass:

@@ -198,7 +198,7 @@ def evaluate(cfg, runs, duration, frictions, vx_list, yaw_list, out_path):
     fieldnames = [
         'friction', 'cmd_vx', 'cmd_yaw', 'run',
         'survived', 'survive_time', 'x_final', 'y_final',
-        'vx_error_mean', 'vy_abs_mean', 'roll_rms', 'pitch_rms', 'cot',
+        'vx_error_mean', 'yaw_error_mean', 'vy_abs_mean', 'roll_rms', 'pitch_rms', 'cot',
     ]
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -515,6 +515,7 @@ def quick_eval(onnx_path, sim_cfg,
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config',   default='deploy/sim2sim/configs/qmini_birl.yaml')
+    parser.add_argument('--policy',   default=None, help='Override policy_path in config (path to .onnx)')
     parser.add_argument('--runs',     type=int,   default=10,   help='Runs per condition')
     parser.add_argument('--duration', type=float, default=10.0, help='Seconds per episode')
     parser.add_argument('--out',      default=None, help='Output CSV path')
@@ -531,6 +532,9 @@ def main():
 
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
+
+    if args.policy is not None:
+        cfg['policy_path'] = args.policy
 
     if args.out is None:
         policy_dir = os.path.dirname(cfg['policy_path'])

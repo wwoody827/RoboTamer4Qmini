@@ -169,8 +169,9 @@ def train():
         if sim2sim_interval > 0 and it % sim2sim_interval == 0 and sim2sim_cfg is not None:
             try:
                 _t0 = time.time()
-                with tempfile.NamedTemporaryFile(suffix='.onnx', delete=False) as _tf:
-                    _onnx_path = _tf.name
+                _deploy_dir = os.path.join(exp_dir, 'deploy')
+                os.makedirs(_deploy_dir, exist_ok=True)
+                _onnx_path = os.path.join(_deploy_dir, f'policy_{it}.onnx')
                 alg.actor.eval()
                 _dummy = torch.zeros(1, task.num_observations, device='cpu')
                 torch.onnx.export(alg.actor.cpu(), _dummy, _onnx_path,
@@ -178,7 +179,6 @@ def train():
                                   verbose=False)
                 alg.actor.to(device).train()
                 _metrics = _quick_eval(_onnx_path, sim2sim_cfg)
-                os.unlink(_onnx_path)
                 for k, v in _metrics.items():
                     if not (isinstance(v, float) and (v != v)):  # skip nan
                         writer.add_scalar(f'5:{k}', v, it)
