@@ -1,5 +1,6 @@
 import importlib
 import os
+import tempfile
 from os.path import join
 
 from env.utils import get_args
@@ -17,6 +18,7 @@ from utils.yaml import ParamsProcess
 from isaacgym.torch_utils import *
 from torch.utils.tensorboard import SummaryWriter
 import torch
+import yaml
 
 # os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
@@ -62,6 +64,28 @@ def train():
     cfg_dict['action'].update({'action_scale_low': cfg.action.low_ranges[2:], 'action_scale_up': cfg.action.high_ranges[2:]})
 
     paramProcess.write_param(join(model_dir, "cfg.yaml"), cfg_dict)
+
+    # ── sim2sim eval setup ────────────────────────────────────────────────────
+    sim2sim_cfg = None
+    sim2sim_interval = getattr(args, 'sim2sim_interval', 0)
+    if sim2sim_interval > 0:
+        sim2sim_config_path = getattr(args, 'sim2sim_config', None)
+        if sim2sim_config_path is None:
+            sim2sim_config_path = 'deploy/sim2sim/configs/qmini_birl.yaml'
+        if os.path.exists(sim2sim_config_path):
+            with open(sim2sim_config_path, encoding='utf-8') as _f:
+                sim2sim_cfg = yaml.safe_load(_f)
+            # add sim2sim helpers to path
+            import sys as _sys
+            _sim2sim_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'deploy', 'sim2sim')
+            if _sim2sim_dir not in _sys.path:
+                _sys.path.insert(0, _sim2sim_dir)
+            from evaluate import quick_eval as _quick_eval
+            print(f'[sim2sim] eval enabled every {sim2sim_interval} iters using {sim2sim_config_path}')
+        else:
+            print(f'[sim2sim] config not found: {sim2sim_config_path} — sim2sim eval disabled')
+            sim2sim_interval = 0
+    # ─────────────────────────────────────────────────────────────────────────
 
     actor = load_actor(cfg_dict['policy'], device).train()
     critic = load_critic(cfg_dict['policy'], device).train()
@@ -139,6 +163,37 @@ def train():
             except OSError as e:
                 print('Failed to save policy.')
                 print(e)
+
+        # ── sim2sim eval ──────────────────────────────────────────────────────
+        if sim2sim_interval > 0 and it % sim2sim_interval == 0 and sim2sim_cfg is not None:
+            try:
+                _t0 = time.time()
+                with tempfile.NamedTemporaryFile(suffix='.onnx', delete=False) as _tf:
+                    _onnx_path = _tf.name
+                alg.actor.eval()
+                _dummy = torch.zeros(1, task.num_observations, device='cpu')
+                torch.onnx.export(alg.actor.cpu(), _dummy, _onnx_path,
+                                  opset_version=12, input_names=['input'], output_names=['output'],
+                                  verbose=False)
+                alg.actor.to(device).train()
+                _metrics = _quick_eval(_onnx_path, sim2sim_cfg)
+                os.unlink(_onnx_path)
+                for k, v in _metrics.items():
+                    if not (isinstance(v, float) and (v != v)):  # skip nan
+                        writer.add_scalar(f'5:{k}', v, it)
+                _elapsed = time.time() - _t0
+                _surv_str = '  '.join(
+                    f'fr{k.split("fr")[1]}={v:.1f}s' for k, v in _metrics.items()
+                    if 'survive_time' in k
+                )
+                print(f'[sim2sim@{it}] {_surv_str}  '
+                      f'vx_err fwd={_metrics.get("sim2sim/vx_err_fwd", float("nan")):.3f} '
+                      f'bwd={_metrics.get("sim2sim/vx_err_bwd", float("nan")):.3f}  '
+                      f'({_elapsed:.0f}s)')
+            except Exception as _e:
+                print(f'[sim2sim] eval failed at iter {it}: {_e}')
+        # ─────────────────────────────────────────────────────────────────────
+
         stop = time.time()
         learn_time = stop - start
         iteration_time = collection_time + learn_time

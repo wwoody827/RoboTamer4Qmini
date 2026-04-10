@@ -806,8 +806,14 @@ class LeggedRobotEnv:
         """
         plane_params = gymapi.PlaneParams()
         plane_params.normal = gymapi.Vec3(0.0, 0.0, 1.0)
-        plane_params.static_friction = self.cfg.terrain.static_friction
-        plane_params.dynamic_friction = self.cfg.terrain.dynamic_friction
+        # set floor friction to the top of the randomization range so that effective
+        # contact friction (combined with per-env foot friction) reaches the full range
+        if self.cfg.domain_rand.randomize_friction:
+            floor_friction = self.cfg.domain_rand.friction_range[1]
+        else:
+            floor_friction = self.cfg.terrain.static_friction
+        plane_params.static_friction = floor_friction
+        plane_params.dynamic_friction = floor_friction
         plane_params.restitution = self.cfg.terrain.restitution
         self.gym.add_ground(self.sim, plane_params)
 

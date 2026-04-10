@@ -304,6 +304,33 @@ def print_report(csv_path):
         mu, std = s['vy_abs_mean'].mean(), s['vy_abs_mean'].std()
         print(f'  {vx:+.1f}  {_bar(mu, 0, 0.5)}  {mu:.3f} ± {std:.3f} m/s')
 
+    # ── forward vs backward symmetry table ──────────────────────────────────
+    fwd_speeds = sorted([v for v in vx_vals if v > 0])
+    bwd_speeds = sorted([-v for v in vx_vals if v < 0])
+    paired = sorted(set(fwd_speeds) & set(bwd_speeds))
+    if paired:
+        print('\n── Forward vs Backward symmetry (friction≤1.5, survived) ──')
+        sep2 = '+-------+----------+----------+----------+----------+----------+----------+'
+        print(sep2)
+        print('| speed | fwd_err  | bwd_err  | Δerr     | fwd_vy   | bwd_vy   | Δvy      |')
+        print(sep2)
+        for spd in paired:
+            sf = sub_ok[sub_ok['cmd_vx'] ==  spd]
+            sb = sub_ok[sub_ok['cmd_vx'] == -spd]
+            if sf.empty or sb.empty:
+                continue
+            fe = sf['vx_error_mean'].mean()
+            be = sb['vx_error_mean'].mean()
+            fv = sf['vy_abs_mean'].mean()
+            bv = sb['vy_abs_mean'].mean()
+            de = be - fe
+            dv = bv - fv
+            de_s = f'{de:+.3f}'
+            dv_s = f'{dv:+.3f}'
+            print(f'| {spd:.1f}   | {fe:8.3f} | {be:8.3f} | {de_s:8} | {fv:8.3f} | {bv:8.3f} | {dv_s:8} |')
+        print(sep2)
+        print('  Δ = backward − forward  (positive = backward is worse)')
+
 
 def make_plots(csv_path):
     if not HAS_MPL:
@@ -412,6 +439,56 @@ def make_plots(csv_path):
     print(f'  saved: {p}')
 
 
+# ── quick eval for tensorboard (called from train.py) ────────────────────────
+
+def quick_eval(onnx_path, sim_cfg,
+               frictions=(1.0, 3.0),
+               vx_list=(-0.5, 0.0, 0.5),
+               runs=10,
+               duration=8.0):
+    """
+    Run a small evaluation matrix and return a flat dict of scalars for
+    TensorBoard logging.  Called periodically from train.py.
+
+    Returns dict with keys:
+        sim2sim/survival_fr{f}        — survival rate per friction level
+        sim2sim/vx_err_fwd            — mean vx error, forward speeds, survived
+        sim2sim/vx_err_bwd            — mean vx error, backward speeds, survived
+        sim2sim/vy_drift              — mean lateral drift, all survived
+        sim2sim/symmetry_delta        — mean |fwd_err - bwd_err| per paired speed
+    """
+    cfg = dict(sim_cfg)
+    cfg['policy_path'] = onnx_path
+
+    rows = []
+    for friction, cmd_vx in itertools.product(frictions, vx_list):
+        for run_i in range(runs):
+            m = run_episode(cfg, cmd_vx, 0.0, friction, duration, seed=run_i)
+            rows.append({'friction': friction, 'cmd_vx': cmd_vx, **m})
+
+    if not rows:
+        return {}
+
+    metrics = {}
+
+    # mean survive_time per friction (continuous, 0–duration seconds)
+    for fr in frictions:
+        sub = [r for r in rows if r['friction'] == fr]
+        metrics[f'sim2sim/survive_time_fr{fr:.1f}'] = float(np.mean([r['survive_time'] for r in sub]))
+
+    # vx tracking / lateral drift (survived only)
+    survived = [r for r in rows if r['survived']]
+    fwd = [r for r in survived if r['cmd_vx'] > 0]
+    bwd = [r for r in survived if r['cmd_vx'] < 0]
+
+    metrics['sim2sim/vx_err_fwd'] = float(np.nanmean([r['vx_error_mean'] for r in fwd]))     if fwd      else float('nan')
+    metrics['sim2sim/vx_err_bwd'] = float(np.nanmean([r['vx_error_mean'] for r in bwd]))     if bwd      else float('nan')
+    metrics['sim2sim/vy_drift']   = float(np.nanmean([r['vy_abs_mean']   for r in survived])) if survived else float('nan')
+    metrics['sim2sim/roll_rms']   = float(np.nanmean([math.degrees(r['roll_rms']) for r in survived])) if survived else float('nan')
+
+    return metrics
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -439,7 +516,7 @@ def main():
         args.out = os.path.join(policy_dir, 'eval.csv')
 
     frictions = [0.5, 1.0, 1.5, 3.0]
-    vx_list   = [-0.3, 0.0, 0.3, 0.5, 0.7]
+    vx_list   = [-0.7, -0.5, -0.3, 0.0, 0.3, 0.5, 0.7]
     yaw_list  = [0.0]
 
     csv_path = evaluate(cfg, args.runs, args.duration, frictions, vx_list, yaw_list, args.out)

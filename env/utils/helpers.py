@@ -124,6 +124,10 @@ def get_args():
         {"name": "--cmd_vx", "type": float, "default": None, "help": "Fix forward velocity command (m/s)."},
         {"name": "--cmd_yaw", "type": float, "default": None, "help": "Fix yaw rate command (rad/s)."},
         {"name": "--out", "type": str, "default": None, "help": "Output video filename (without extension)."},
+        {"name": "--sim2sim_config", "type": str, "default": None,
+         "help": "Path to sim2sim YAML config for periodic evaluation (default: auto-detect qmini_birl.yaml)"},
+        {"name": "--sim2sim_interval", "type": int, "default": 0,
+         "help": "Run sim2sim eval every N training iterations (0 = disabled)"},
 
     ]
     # parse arguments

@@ -303,10 +303,10 @@ class BIRLTask(BaseTask):
         foot_support_rew *= self.static_flag
         foot_clear_rew *= self.static_flag
 
-        foot_heit_score = 40. * torch.clip(self.foot_height, min=0.0, max=0.05)
+        foot_heit_score = 40. * torch.clip(self.foot_height, min=0.0, max=0.08)
         foot_height_rew = torch.sum(self.foot_swing_mask * foot_heit_score, dim=1,keepdim=True).clip(max=2.) * self.static_flag
 
-        foot_height_rew += -20. * torch.sum((self.foot_height - 0.06).clip(min=0.), dim=1, keepdim=True)
+        foot_height_rew += -20. * torch.sum((self.foot_height - 0.10).clip(min=0.), dim=1, keepdim=True)
         foot_height_rew += -0.2 * torch.sum(self.foot_support_mask * foot_heit_score, dim=1,keepdim=True) * self.static_flag
         foot_height_rew += -0.2 * torch.sum(support_foot_index * foot_heit_score, dim=1, keepdim=True) * self.static_flag
 
