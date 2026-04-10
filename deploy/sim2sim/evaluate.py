@@ -123,6 +123,7 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None):
     fall_thresh = 0.25
 
     vx_errors    = []
+    yaw_errors   = []
     vy_abs       = []
     roll_rms_acc = []
     pitch_rms_acc= []
@@ -156,6 +157,7 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None):
 
         if step % decimation == 0:
             vx_errors.append(abs(data.qvel[0] - cmd_vx))
+            yaw_errors.append(abs(data.qvel[5] - cmd_yaw))
             vy_abs.append(abs(data.qvel[1]))
             quat  = data.xquat[imu_body_id] if imu_body_id >= 0 else data.qpos[3:7]
             euler = quat_to_euler_xyz(quat)
@@ -176,8 +178,9 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None):
         'survive_time':   survive_steps * sim_dt,
         'x_final':        x_final,
         'y_final':        y_final,
-        'vx_error_mean':  float(np.mean(vx_errors)) if vx_errors else float('nan'),
-        'vy_abs_mean':    float(np.mean(vy_abs))    if vy_abs    else float('nan'),
+        'vx_error_mean':  float(np.mean(vx_errors))  if vx_errors  else float('nan'),
+        'yaw_error_mean': float(np.mean(yaw_errors)) if yaw_errors else float('nan'),
+        'vy_abs_mean':    float(np.mean(vy_abs))     if vy_abs     else float('nan'),
         'roll_rms':       float(np.sqrt(np.mean(roll_rms_acc)))  if roll_rms_acc  else float('nan'),
         'pitch_rms':      float(np.sqrt(np.mean(pitch_rms_acc))) if pitch_rms_acc else float('nan'),
         'cot':            cot,
@@ -444,27 +447,38 @@ def make_plots(csv_path):
 def quick_eval(onnx_path, sim_cfg,
                frictions=(1.0, 3.0),
                vx_list=(-0.5, 0.0, 0.5),
+               yaw_list=(0.0, 0.5, -0.5),
                runs=10,
-               duration=8.0):
+               duration=15.0):
     """
     Run a small evaluation matrix and return a flat dict of scalars for
     TensorBoard logging.  Called periodically from train.py.
 
     Returns dict with keys:
-        sim2sim/survival_fr{f}        — survival rate per friction level
-        sim2sim/vx_err_fwd            — mean vx error, forward speeds, survived
-        sim2sim/vx_err_bwd            — mean vx error, backward speeds, survived
-        sim2sim/vy_drift              — mean lateral drift, all survived
-        sim2sim/symmetry_delta        — mean |fwd_err - bwd_err| per paired speed
+        sim2sim/survive_time_fr{f}   — mean survive time per friction level
+        sim2sim/vx_err_fwd/bwd       — mean vx error, forward/backward speeds
+        sim2sim/yaw_err              — mean yaw rate error, non-zero yaw commands
+        sim2sim/vy_drift             — mean lateral drift
+        sim2sim/pitch_rms_fwd/bwd    — mean pitch RMS forward/backward
+        sim2sim/roll_rms             — mean roll RMS
     """
     cfg = dict(sim_cfg)
     cfg['policy_path'] = onnx_path
 
     rows = []
+    # vx sweep (cmd_yaw=0): covers survival, vx tracking, pitch/roll
     for friction, cmd_vx in itertools.product(frictions, vx_list):
         for run_i in range(runs):
             m = run_episode(cfg, cmd_vx, 0.0, friction, duration, seed=run_i)
-            rows.append({'friction': friction, 'cmd_vx': cmd_vx, **m})
+            rows.append({'friction': friction, 'cmd_vx': cmd_vx, 'cmd_yaw': 0.0, **m})
+
+    # yaw sweep (vx=0, fr=1.0 only): covers yaw tracking
+    for cmd_yaw in yaw_list:
+        if cmd_yaw == 0.0:
+            continue
+        for run_i in range(runs):
+            m = run_episode(cfg, 0.0, cmd_yaw, 1.0, duration, seed=run_i)
+            rows.append({'friction': 1.0, 'cmd_vx': 0.0, 'cmd_yaw': cmd_yaw, **m})
 
     if not rows:
         return {}
@@ -472,19 +486,26 @@ def quick_eval(onnx_path, sim_cfg,
     metrics = {}
 
     # mean survive_time per friction (continuous, 0–duration seconds)
+    vx_rows = [r for r in rows if r['cmd_yaw'] == 0.0]
     for fr in frictions:
-        sub = [r for r in rows if r['friction'] == fr]
+        sub = [r for r in vx_rows if r['friction'] == fr]
         metrics[f'sim2sim/survive_time_fr{fr:.1f}'] = float(np.mean([r['survive_time'] for r in sub]))
 
-    # vx tracking / lateral drift (survived only)
-    survived = [r for r in rows if r['survived']]
+    # vx tracking / lateral drift / pitch (survived, cmd_yaw=0 only)
+    survived = [r for r in vx_rows if r['survived']]
     fwd = [r for r in survived if r['cmd_vx'] > 0]
     bwd = [r for r in survived if r['cmd_vx'] < 0]
 
-    metrics['sim2sim/vx_err_fwd'] = float(np.nanmean([r['vx_error_mean'] for r in fwd]))     if fwd      else float('nan')
-    metrics['sim2sim/vx_err_bwd'] = float(np.nanmean([r['vx_error_mean'] for r in bwd]))     if bwd      else float('nan')
-    metrics['sim2sim/vy_drift']   = float(np.nanmean([r['vy_abs_mean']   for r in survived])) if survived else float('nan')
-    metrics['sim2sim/roll_rms']   = float(np.nanmean([math.degrees(r['roll_rms']) for r in survived])) if survived else float('nan')
+    metrics['sim2sim/vx_err_fwd']    = float(np.nanmean([r['vx_error_mean'] for r in fwd]))     if fwd      else float('nan')
+    metrics['sim2sim/vx_err_bwd']    = float(np.nanmean([r['vx_error_mean'] for r in bwd]))     if bwd      else float('nan')
+    metrics['sim2sim/vy_drift']      = float(np.nanmean([r['vy_abs_mean']   for r in survived])) if survived else float('nan')
+    metrics['sim2sim/roll_rms']      = float(np.nanmean([math.degrees(r['roll_rms'])   for r in survived])) if survived else float('nan')
+    metrics['sim2sim/pitch_rms_fwd'] = float(np.nanmean([math.degrees(r['pitch_rms']) for r in fwd]))       if fwd      else float('nan')
+    metrics['sim2sim/pitch_rms_bwd'] = float(np.nanmean([math.degrees(r['pitch_rms']) for r in bwd]))       if bwd      else float('nan')
+
+    # yaw tracking (survived yaw-sweep episodes)
+    yaw_rows = [r for r in rows if r['cmd_yaw'] != 0.0 and r['survived']]
+    metrics['sim2sim/yaw_err'] = float(np.nanmean([r['yaw_error_mean'] for r in yaw_rows])) if yaw_rows else float('nan')
 
     return metrics
 

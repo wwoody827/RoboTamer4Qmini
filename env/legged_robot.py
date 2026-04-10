@@ -357,6 +357,25 @@ class LeggedRobotEnv:
 
         return props
 
+    def update_friction_curriculum(self, cur_iter):
+        """Gradually increase friction max over training iterations."""
+        if not self.cfg.domain_rand.randomize_friction:
+            return
+        if not getattr(self.cfg.domain_rand, 'friction_curriculum', False):
+            return
+        end_iter   = self.cfg.domain_rand.friction_curriculum_end_iter
+        start_max  = self.cfg.domain_rand.friction_curriculum_start
+        full_max   = self.cfg.domain_rand.friction_range[1]
+        progress   = min(cur_iter / end_iter, 1.0)
+        cur_max    = start_max + (full_max - start_max) * progress
+        fric_min   = self.cfg.domain_rand.friction_range[0]
+        self.friction_coeffs = torch_rand_float(fric_min, cur_max, (self.num_envs, 1), device='cpu')
+        for env_id in range(self.num_envs):
+            props = self.gym.get_actor_rigid_shape_properties(self.envs[env_id], self.actor_handles[env_id])
+            for s in range(len(props)):
+                props[s].friction = float(self.friction_coeffs[env_id])
+            self.gym.set_actor_rigid_shape_properties(self.envs[env_id], self.actor_handles[env_id], props)
+
     def _process_rigid_body_props(self, props):
         if self.cfg.domain_rand.randomize_mass:
             mrng = self.cfg.domain_rand.added_mass_range

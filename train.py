@@ -116,6 +116,7 @@ def train():
     rew_component_steps = 0
     for it in range(current_learning_iteration, total_iteration):
 
+        env.update_friction_curriculum(it)
         start = time.time()
         rew_component_acc = None
         rew_component_steps = 0

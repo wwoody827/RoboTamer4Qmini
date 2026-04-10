@@ -84,6 +84,9 @@ class Base:
     class domain_rand(SetDict2Class):
         randomize_friction = True
         friction_range = [0.2, 3.0]
+        friction_curriculum = True        # gradually increase friction max during training
+        friction_curriculum_start = 0.8  # initial friction max
+        friction_curriculum_end_iter = 3000  # iter at which full friction_range[1] is reached
         rest_offset_range = [-0.01, 0.0]  # simulate soft surfaces: foot sinks 0–1cm into ground
         randomize_mass = True
         added_mass_range = [0.5, 1.5]
