@@ -104,20 +104,24 @@ Note: MuJoCo `cvel` packs `[angular(3), linear(3)]` — the opposite of what you
 
 Angular velocity is expressed in the **body frame**, matching Isaac Gym's `quat_rotate_inverse(base_quat, base_avel)`. The rotation matrix is constructed from the quaternion and transposed to go from world → body.
 
-### Observation vector (43 dimensions per step)
+### Observation vector (44 dimensions per step — updated April 2026)
 
 | Index | Content | Scale | Source |
 |---|---|---|---|
-| 0–1 | `[cmd_vx, cmd_yaw]` | none | command |
-| 2–3 | `[roll, pitch]` | ×1.0 | imu_in_torso euler |
-| 4–6 | angular velocity | ×0.5 | imu body frame |
-| 7–16 | joint pos − ref_joint_pos | ×1.0 | qpos[7:17] |
-| 17–26 | joint velocity | ×0.1 | qvel[6:16] |
-| 27–36 | joint_act − joint_pos | ×1.0 | tracking error |
-| 37–40 | `[sin(φ_L), sin(φ_R), cos(φ_L), cos(φ_R)]` × static_flag | — | phase modulator |
-| 41–42 | `(freq × 0.3 − 1.0)` × static_flag | — | phase modulator |
+| 0 | `cmd_vx` | none | command |
+| 1 | `cmd_vy` | none | command (lateral — added April 2026) |
+| 2 | `cmd_yaw` | none | command |
+| 3–4 | `[roll, pitch]` | ×1.0 | imu_in_torso euler |
+| 5–7 | angular velocity | ×0.5 | imu body frame |
+| 8–17 | joint pos − ref_joint_pos | ×1.0 | qpos[7:17] |
+| 18–27 | joint velocity | ×0.1 | qvel[6:16] |
+| 28–37 | joint_act − joint_pos | ×1.0 | tracking error |
+| 38–41 | `[sin(φ_L), sin(φ_R), cos(φ_L), cos(φ_R)]` × static_flag | — | phase modulator |
+| 42–43 | `(freq × 0.3 − 1.0)` × static_flag | — | phase modulator |
 
-`static_flag = 1` if `‖[cmd_vx, cmd_yaw]‖ ≥ 0.15`, else `0`. When standing still, the phase signal is zeroed.
+`static_flag = 1` if `‖[cmd_vx, cmd_vy, cmd_yaw]‖ ≥ 0.15`, else `0`. When standing still, the phase signal is zeroed.
+
+**Note**: obs was 43 dims before April 2026 (no cmd_vy). Policies trained before this date are incompatible.
 
 ### History stacking
 
@@ -228,6 +232,7 @@ LD_LIBRARY_PATH=~/miniconda3/envs/qmini/lib \
 ~/miniconda3/envs/qmini/bin/python deploy/sim2sim/sim2sim.py \
     [--config deploy/sim2sim/configs/qmini_birl.yaml] \
     [--cmd_vx 0.5] \
+    [--cmd_vy 0.0] \
     [--cmd_yaw 0.0] \
     [--duration 30] \
     [--headless]       # no viewer — prints x/y/z/roll/pitch/yaw/vx/vy to stdout
