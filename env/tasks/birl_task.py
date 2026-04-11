@@ -210,8 +210,9 @@ class BIRLTask(BaseTask):
 
     def pure_critic_observation(self):
         obs_buf = torch.cat([
-            self.commands[:, [0,2]],
+            self.commands[:, [0,1,2]],
             self.commands[:, [0]] - self.env.base_lin_vel[:, [0]],
+            self.commands[:, [1]] - self.env.base_lin_vel[:, [1]],
             self.commands[:, [2]] - self.env.base_ang_vel[:, [2]],
             self.env.base_lin_vel,
             self.env.base_euler[:, :2],
@@ -239,7 +240,7 @@ class BIRLTask(BaseTask):
 
     def pure_observation(self):
         self.obs_buf = torch.cat([
-            self.commands[:, [0,2]],
+            self.commands[:, [0,1,2]],
             self.base_euler[:, :2] * 1.,
             self.base_ang_vel * 0.5,
             self.joint_pos - self.ref_joint_action,
@@ -278,11 +279,11 @@ class BIRLTask(BaseTask):
 
         forward_vel_rew = torch.exp(-torch.clip(5. / lin_vel_x_norm, min=2., max=10.) * (
                 self.commands[:, [0]] - self.env.base_lin_vel[:, [0]]) ** 2) #* balance_rew
-        lateral_vel_rew = torch.exp(-torch.clip(5. / lin_vel_x_norm, min=3., max=15.) * torch.norm(self.env.base_lin_vel[:, [1]], dim=1, keepdim=True) ** 2)
+        lateral_vel_rew = torch.exp(-torch.clip(5. / lin_vel_x_norm, min=3., max=15.) * (self.commands[:, [1]] - self.env.base_lin_vel[:, [1]]) ** 2)
 
         yaw_rate_rew = torch.exp(-torch.clip(2. / yaw_rate_norm, min=2., max=6.) * (self.commands[:, [2]] - self.env.base_ang_vel[:, [2]]) ** 2)
 
-        lateral_vel_rew += -0.6 / lin_vel_x_norm * torch.norm(self.env.base_lin_vel[:, [1]], dim=1, keepdim=True) * self.static_flag
+        lateral_vel_rew += -0.6 / lin_vel_x_norm * torch.abs(self.commands[:, [1]] - self.env.base_lin_vel[:, [1]]) * self.static_flag
 
         ang_vel_rew = torch.exp(
             -torch.clip(2. / lin_vel_x_norm, min=0.7, max=6.) * torch.norm(self.env.base_ang_vel[:, :2], dim=1,
@@ -292,7 +293,7 @@ class BIRLTask(BaseTask):
 
         vertical_vel_rew = torch.exp(-torch.clip(5. / lin_vel_x_norm, min=2., max=10.) * torch.norm(self.env.base_lin_vel[:, [2]], dim=1,
                                                                            keepdim=True) ** 2)
-        vertical_vel_rew -= 0.2 / lin_vel_x_norm * torch.norm(self.env.base_lin_vel[:, 1:], dim=1, keepdim=True) * self.static_flag
+        vertical_vel_rew -= 0.2 / lin_vel_x_norm * torch.norm(self.env.base_lin_vel[:, [2]], dim=1, keepdim=True) * self.static_flag
 
         support_foot_index = torch.where(self.env.foot_frc >= 10., True, False)
         swing_foot_index = torch.where(self.env.foot_frc < 1., True, False)

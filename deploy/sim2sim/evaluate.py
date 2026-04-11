@@ -45,7 +45,7 @@ except ImportError:
 
 # ── episode runner ────────────────────────────────────────────────────────────
 
-def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None):
+def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_vy=0.0):
     """Run one episode. Returns a dict of scalar metrics."""
     if seed is not None:
         np.random.seed(seed)
@@ -68,7 +68,7 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None):
     obs_dim    = cfg['num_obs_per_step']
     static_thr = cfg['static_cmd_threshold']
 
-    commands    = np.array([cmd_vx, cmd_yaw], dtype=np.float32)
+    commands    = np.array([cmd_vx, cmd_vy, cmd_yaw], dtype=np.float32)
     static_flag = float(np.linalg.norm(commands) >= static_thr)
 
     session    = ort.InferenceSession(cfg['policy_path'])

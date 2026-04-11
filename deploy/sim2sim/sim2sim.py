@@ -192,9 +192,10 @@ def build_mujoco_model(urdf_path, sim_dt, init_height=0.5, floor_friction=1.0, f
 # Main sim2sim loop
 # ---------------------------------------------------------------------------
 
-def run(cfg, cmd_vx=None, cmd_yaw=None, duration=None, headless=False):
+def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, duration=None, headless=False):
     # Override commands if provided
     cmd_vx  = cmd_vx  if cmd_vx  is not None else cfg['cmd_vx']
+    cmd_vy  = cmd_vy  if cmd_vy  is not None else cfg.get('cmd_vy', 0.0)
     cmd_yaw = cmd_yaw if cmd_yaw is not None else cfg['cmd_yaw']
     duration = duration if duration is not None else cfg['simulation_duration']
 
@@ -216,7 +217,7 @@ def run(cfg, cmd_vx=None, cmd_yaw=None, duration=None, headless=False):
     obs_dim     = cfg['num_obs_per_step']
     static_thr  = cfg['static_cmd_threshold']
 
-    commands = np.array([cmd_vx, cmd_yaw], dtype=np.float32)
+    commands = np.array([cmd_vx, cmd_vy, cmd_yaw], dtype=np.float32)
     static_flag = float(np.linalg.norm(commands) >= static_thr)
 
     # Load ONNX policy
@@ -291,7 +292,7 @@ def run(cfg, cmd_vx=None, cmd_yaw=None, duration=None, headless=False):
         pm_f_val = (pm.frequency * 0.3 - 1.0) * static_flag
 
         obs = np.concatenate([
-            commands,          # 2: vx, yaw
+            commands,          # 3: vx, vy, yaw
             base_euler,        # 2: roll, pitch
             base_ang_vel * 0.5,# 3: ang vel
             joint_pos_rel,     # 10
@@ -322,7 +323,7 @@ def run(cfg, cmd_vx=None, cmd_yaw=None, duration=None, headless=False):
     total_steps = int(duration / sim_dt)
     log_interval = int(1.0 / sim_dt)  # print every 1 simulated second
 
-    print(f"\nRunning sim2sim: cmd_vx={cmd_vx:.2f} m/s, cmd_yaw={cmd_yaw:.2f} rad/s")
+    print(f"\nRunning sim2sim: cmd_vx={cmd_vx:.2f} m/s, cmd_vy={cmd_vy:.2f} m/s, cmd_yaw={cmd_yaw:.2f} rad/s")
     print(f"Duration: {duration:.1f}s  |  Policy @ {1/policy_dt:.0f}Hz  |  Physics @ {1/sim_dt:.0f}Hz")
     print(f"{'time':>6}  {'x':>7}  {'y':>7}  {'z':>7}  {'roll':>7}  {'pitch':>7}  {'yaw':>7}  {'vx':>7}  {'vy':>7}")
 
@@ -388,6 +389,7 @@ def main():
     parser = argparse.ArgumentParser(description='Sim2Sim validation in MuJoCo')
     parser.add_argument('--config',   type=str,   default='deploy/sim2sim/configs/qmini_birl.yaml')
     parser.add_argument('--cmd_vx',   type=float, default=None, help='Forward velocity (m/s)')
+    parser.add_argument('--cmd_vy',   type=float, default=None, help='Lateral velocity (m/s)')
     parser.add_argument('--cmd_yaw',  type=float, default=None, help='Yaw rate (rad/s)')
     parser.add_argument('--duration', type=float, default=None, help='Duration (s)')
     parser.add_argument('--headless', action='store_true', help='Run without viewer, print state to stdout')
@@ -405,7 +407,7 @@ def main():
         cfg['floor_friction'] = args.floor_friction
     if args.floor_aniso:
         cfg['floor_aniso'] = True
-    run(cfg, cmd_vx=args.cmd_vx, cmd_yaw=args.cmd_yaw, duration=args.duration, headless=args.headless)
+    run(cfg, cmd_vx=args.cmd_vx, cmd_vy=args.cmd_vy, cmd_yaw=args.cmd_yaw, duration=args.duration, headless=args.headless)
 
 
 if __name__ == '__main__':

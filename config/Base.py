@@ -123,7 +123,7 @@ class Base:
         heading_command = False  # if true: compute ang vel command from heading error
 
         lin_vel_x_range = [-0.3, 0.7]
-        lin_vel_y_range = [-0., 0.]
+        lin_vel_y_range = [-0.3, 0.3]
         ang_vel_yaw_range = [-1, 1]
         heading_range = [0., pi]
 
