@@ -84,10 +84,7 @@ class Base:
     class domain_rand(SetDict2Class):
         randomize_friction = True
         friction_range = [0.2, 3.0]
-        friction_curriculum = True        # gradually increase friction max during training
-        friction_curriculum_start = 0.8  # initial friction max
-        friction_curriculum_end_iter = 3000  # iter at which full friction_range[1] is reached
-        rest_offset_range = [-0.01, 0.0]  # simulate soft surfaces: foot sinks 0–1cm into ground
+        rest_offset_range = [0.0, 0.0]  # no surface sinking simulation
         randomize_mass = True
         added_mass_range = [0.5, 1.5]
         added_inertia_range = [0.5, 1.5]
@@ -125,7 +122,7 @@ class Base:
         resampling_time = 5.  # time before command are changed[s]
         heading_command = False  # if true: compute ang vel command from heading error
 
-        lin_vel_x_range = [-0.7, 0.7]
+        lin_vel_x_range = [-0.3, 0.7]
         lin_vel_y_range = [-0., 0.]
         ang_vel_yaw_range = [-1, 1]
         heading_range = [0., pi]
