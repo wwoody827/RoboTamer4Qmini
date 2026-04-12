@@ -195,17 +195,25 @@ class CommandInput:
         if changed:
             print(f"\r[cmd] vx={vx:+.1f}  vy={vy:+.1f}  yaw={yaw:+.1f}    ", end='', flush=True)
 
+    def _apply_deadzone(self, value, zone):
+        """Zero out small stick drift; rescale remaining range to [0, 1]."""
+        if abs(value) < zone:
+            return 0.0
+        # rescale so edge of deadzone maps to 0, not zone
+        sign = 1.0 if value > 0 else -1.0
+        return sign * (abs(value) - zone) / (1.0 - zone)
+
     def update_joystick(self):
         """Poll joystick axes each physics step (no-op if no joystick)."""
         if self._joystick is None:
             return
         pygame.event.pump()
-        vx  = -self._joystick.get_axis(1)
-        vy  = -self._joystick.get_axis(0)
-        yaw = -self._joystick.get_axis(2)
-        vx  = 0.0 if abs(vx)  < 0.05 else vx
-        vy  = 0.0 if abs(vy)  < 0.05 else vy
-        yaw = 0.0 if abs(yaw) < 0.05 else yaw
+        vx  = -self._joystick.get_axis(1)   # left stick Y  (push fwd = negative → negate)
+        vy  = -self._joystick.get_axis(0)   # left stick X  (push left = positive → negate)
+        yaw = -self._joystick.get_axis(3)   # right stick X (ax2 is LT trigger, not a stick)
+        vx  = self._apply_deadzone(vx,  0.10)
+        vy  = self._apply_deadzone(vy,  0.10)
+        yaw = self._apply_deadzone(yaw, 0.15)   # yaw axis often drifts more
         reset = any(self._joystick.get_button(i) for i in range(min(self._joystick.get_numbuttons(), 1)))
         with self._lock:
             self.cmd_vx  = float(np.clip(vx  * 0.7, *self._VX_RANGE))
@@ -350,11 +358,13 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, duration=None, headless=Fal
     obs_dim     = cfg['num_obs_per_step']
     static_thr  = cfg['static_cmd_threshold']
 
-    commands = np.array([cmd_vx, cmd_vy, cmd_yaw], dtype=np.float32)
+    # Interactive mode: always start from zero (joystick/keyboard is authoritative)
+    cin = CommandInput(0.0, 0.0, 0.0) if (interactive and not headless) else None
+    _init_vx  = 0.0 if cin else cmd_vx
+    _init_vy  = 0.0 if cin else cmd_vy
+    _init_yaw = 0.0 if cin else cmd_yaw
+    commands = np.array([_init_vx, _init_vy, _init_yaw], dtype=np.float32)
     static_flag = float(np.linalg.norm(commands) >= static_thr)
-
-    # Interactive input controller
-    cin = CommandInput(cmd_vx, cmd_vy, cmd_yaw) if (interactive and not headless) else None
 
     # Load ONNX policy (skip if stand_only)
     if stand_only:
