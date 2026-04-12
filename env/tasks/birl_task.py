@@ -271,7 +271,7 @@ class BIRLTask(BaseTask):
 
     def reward(self):
         constant_rew = to_torch([1.]).repeat(self.num_envs, 1)
-        lin_vel_x_norm = torch.clip(torch.abs(self.commands[:, [0]]), min=0.3, max=2.) + 0.2
+        lin_vel_x_norm = torch.clip(torch.norm(self.commands[:, [0, 1]], dim=1, keepdim=True), min=0.3, max=2.) + 0.2
         yaw_rate_norm = torch.clip(torch.abs(self.commands[:, [2]]), min=0.3, max=1.5) + 0.2
         base_heit_rew = torch.exp(-70 * (self.env.base_pos[:, [2]] - 0.45) ** 2)
 
@@ -327,8 +327,9 @@ class BIRLTask(BaseTask):
             (self.env.foot_vel.view(self.num_envs, self.num_legs, -1)[:, :, 0]) * self.commands[:, [0]].sign() * self.foot_swing_mask,
             dim=1, keepdim=True)).clip(min=-0., max=1.) * self.static_flag
 
+        vy_walking = (torch.abs(self.commands[:, [1]]) > 0.1).float()
         foot_slip_rew += -0.5 * torch.norm(torch.norm(self.env.foot_vel.view(self.num_envs, self.num_legs, -1)[:, :, [1]], dim=-1), dim=1,
-                                           keepdim=True) * self.static_flag
+                                           keepdim=True) * self.static_flag * (1. - vy_walking)
 
         foot_slip_rew += 0.3 * torch.norm(torch.norm(self.env.foot_vel.view(self.num_envs, self.num_legs, -1)[:, :, :2], dim=-1), dim=1, keepdim=True) * (
                 self.static_flag - 1.)
@@ -353,7 +354,7 @@ class BIRLTask(BaseTask):
             (self.net_out_history[-3] - 2 * self.net_out_history[-2] + self.net_out_history[-1])[:, self.num_legs:],dim=1,keepdim=True) ** 2
 
         action_constraint_rew = -0.1 * torch.clip(1. / lin_vel_x_norm, 0, 1.) * torch.norm((self.current_joint_act - self.ref_joint_action), dim=1, keepdim=True)
-        action_constraint_rew += -3. * torch.norm(((self.current_joint_act - self.ref_joint_action)[:, [0, 1, 5, 6]]), dim=1, keepdim=True) * self.static_flag
+        action_constraint_rew += -3. * torch.norm(((self.current_joint_act - self.ref_joint_action)[:, [0, 1, 5, 6]]), dim=1, keepdim=True) * self.static_flag * (1. - vy_walking)
 
         sa_constraint_rew = -0.1 * torch.clip(1. / lin_vel_x_norm, min=0., max=1.) * torch.norm(self.current_joint_act - self.ref_joint_action, dim=1,keepdim=True) ** 2 * self.static_flag
 
@@ -367,7 +368,7 @@ class BIRLTask(BaseTask):
         joint_pos_error_rew = - 0.4 * torch.clip(1. / lin_vel_x_norm, min=0., max=1.) * torch.norm((self.current_joint_act - self.env.joint_pos), dim=1,keepdim=True) ** 2
 
         joint_velocity_rew = -0.4 * torch.clip(1. / lin_vel_x_norm, min=0., max=1.) * torch.norm(self.env.joint_vel[:, :], dim=1,keepdim=True) ** 2
-        joint_velocity_rew += -torch.clip(1. / lin_vel_x_norm, 0, 1) * torch.norm(self.env.joint_vel[:, [0, 1, 5, 6]], dim=1,keepdim=True) ** 2
+        joint_velocity_rew += -torch.clip(1. / lin_vel_x_norm, 0, 1) * torch.norm(self.env.joint_vel[:, [0, 1, 5, 6]], dim=1,keepdim=True) ** 2 * (1. - vy_walking)
 
         joint_tor_rew = -0.4 * torch.clip(1. / lin_vel_x_norm, min=0., max=2.) * torch.sum(
             (torch.abs(self.env.react_tau[:, :]) - self.env.torque_limits[:]).clip(min=0.), dim=1, keepdim=True)
