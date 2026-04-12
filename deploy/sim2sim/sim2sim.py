@@ -97,7 +97,7 @@ def scale_transform(action, low, high, clip_val=1.0):
 # MuJoCo scene builder
 # ---------------------------------------------------------------------------
 
-def build_mujoco_model(urdf_path, sim_dt, init_height=0.5, floor_friction=1.0, floor_aniso=False):
+def build_mujoco_model(urdf_path, sim_dt, init_height=0.5, floor_friction=1.0, floor_aniso=False, fix_base=False):
     """
     Load robot from URDF via MjSpec, add a floor and actuators, return compiled model.
     Requires MuJoCo >= 3.0.
@@ -151,8 +151,9 @@ def build_mujoco_model(urdf_path, sim_dt, init_height=0.5, floor_friction=1.0, f
     # Place robot at init height and give it a floating base joint
     base     = spec.find_body('base_link')
     base.pos = np.array([0.0, 0.0, init_height])
-    fj       = base.add_freejoint()
-    fj.name  = "root"
+    if not fix_base:
+        fj       = base.add_freejoint()
+        fj.name  = "root"
 
     # Add torque actuators for each revolute joint
     joint_names = [
@@ -192,7 +193,7 @@ def build_mujoco_model(urdf_path, sim_dt, init_height=0.5, floor_friction=1.0, f
 # Main sim2sim loop
 # ---------------------------------------------------------------------------
 
-def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, duration=None, headless=False):
+def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, duration=None, headless=False, stand_only=False):
     # Override commands if provided
     cmd_vx  = cmd_vx  if cmd_vx  is not None else cfg['cmd_vx']
     cmd_vy  = cmd_vy  if cmd_vy  is not None else cfg.get('cmd_vy', 0.0)
@@ -220,29 +221,35 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, duration=None, headless=Fal
     commands = np.array([cmd_vx, cmd_vy, cmd_yaw], dtype=np.float32)
     static_flag = float(np.linalg.norm(commands) >= static_thr)
 
-    # Load ONNX policy
-    policy_path = cfg['policy_path']
-    print(f"Loading policy: {policy_path}")
-    session = ort.InferenceSession(policy_path)
-    input_name = session.get_inputs()[0].name
+    # Load ONNX policy (skip if stand_only)
+    if stand_only:
+        session = None
+        input_name = None
+        print("Stand-only mode: policy inference disabled, holding ref joint positions.")
+    else:
+        policy_path = cfg['policy_path']
+        print(f"Loading policy: {policy_path}")
+        session = ort.InferenceSession(policy_path)
+        input_name = session.get_inputs()[0].name
 
     # Build MuJoCo model
     print(f"Building MuJoCo scene from: {cfg['urdf_path']}")
     model = build_mujoco_model(cfg['urdf_path'], sim_dt, cfg['init_height'],
                                floor_friction=cfg.get('floor_friction', 1.0),
-                               floor_aniso=cfg.get('floor_aniso', False))
+                               floor_aniso=cfg.get('floor_aniso', False),
+                               fix_base=stand_only)
     data  = mujoco.MjData(model)
 
     # Print joint order (useful for debugging)
     joint_names = [model.joint(i).name for i in range(model.njnt)]
     print(f"MuJoCo joints: {joint_names}")
 
-    # Find freejoint index (root body)
-    # qpos layout: [7 freejoint (pos+quat)] + [10 revolute joints]
-    # qvel layout: [6 freejoint (lin+ang vel)] + [10 joint vels]
+    # qpos/qvel layout depends on whether base is free or fixed
+    # free:  qpos = [7 (pos+quat)] + [10 joints],  qvel = [6 (lin+ang)] + [10]
+    # fixed: qpos = [10 joints],                   qvel = [10]
     NUM_JOINTS = 10
-    QPOS_START = 7   # after freejoint pos/quat
-    QVEL_START = 6   # after freejoint lin/ang vel
+    QPOS_START = 0 if stand_only else 7
+    QVEL_START = 0 if stand_only else 6
 
     # Find imu_in_torso body id (training reads quat/angvel from IMU, not base_link)
     imu_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, 'imu_in_torso')
@@ -330,15 +337,16 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, duration=None, headless=Fal
     def _physics_step():
         nonlocal step, static_flag
         if step % decimation == 0:
-            obs_now = get_obs()
-            obs_history.append(obs_now)
-            obs_stacked = np.concatenate(list(obs_history))[np.newaxis, :]
+            if not stand_only:
+                obs_now = get_obs()
+                obs_history.append(obs_now)
+                obs_stacked = np.concatenate(list(obs_history))[np.newaxis, :]
 
-            net_out = session.run(None, {input_name: obs_stacked})[0][0]
-            scaled = scale_transform(net_out, act_low, act_high)
-            pm.compute(scaled[:num_legs])
-            current_joint_act[:] += scaled[num_legs:] * policy_dt
-            current_joint_act[:] = np.clip(current_joint_act, jlim_low, jlim_high)
+                net_out = session.run(None, {input_name: obs_stacked})[0][0]
+                scaled = scale_transform(net_out, act_low, act_high)
+                pm.compute(scaled[:num_legs])
+                current_joint_act[:] += scaled[num_legs:] * policy_dt
+                current_joint_act[:] = np.clip(current_joint_act, jlim_low, jlim_high)
             static_flag = float(np.linalg.norm(commands) >= static_thr)
 
         q  = data.qpos[QPOS_START:QPOS_START + NUM_JOINTS]
@@ -350,16 +358,18 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, duration=None, headless=Fal
 
         if step % log_interval == 0:
             t = step * sim_dt
-            x, y, z = data.qpos[0], data.qpos[1], data.qpos[2]
-            # freejoint qpos: [x,y,z, w,x,y,z] — use xquat which is always [w,x,y,z]
-            quat = data.xquat[imu_body_id]  # [w,x,y,z]
-            euler = quat_to_euler_xyz(quat)
-            vx = data.qvel[0]
-            vy = data.qvel[1]
-            print(f"{t:6.1f}  {x:7.3f}  {y:7.3f}  {z:7.3f}  "
-                  f"{np.degrees(euler[0]):7.2f}  {np.degrees(euler[1]):7.2f}  "
-                  f"{np.degrees(euler[2]):7.2f}  "
-                  f"{vx:7.3f}  {vy:7.3f}")
+            if stand_only:
+                print(f"{t:6.1f}  (fixed base — standing pose)")
+            else:
+                x, y, z = data.qpos[0], data.qpos[1], data.qpos[2]
+                quat = data.xquat[imu_body_id]  # [w,x,y,z]
+                euler = quat_to_euler_xyz(quat)
+                vx = data.qvel[0]
+                vy = data.qvel[1]
+                print(f"{t:6.1f}  {x:7.3f}  {y:7.3f}  {z:7.3f}  "
+                      f"{np.degrees(euler[0]):7.2f}  {np.degrees(euler[1]):7.2f}  "
+                      f"{np.degrees(euler[2]):7.2f}  "
+                      f"{vx:7.3f}  {vy:7.3f}")
 
     if headless:
         while step < total_steps:
@@ -392,8 +402,9 @@ def main():
     parser.add_argument('--cmd_vy',   type=float, default=None, help='Lateral velocity (m/s)')
     parser.add_argument('--cmd_yaw',  type=float, default=None, help='Yaw rate (rad/s)')
     parser.add_argument('--duration', type=float, default=None, help='Duration (s)')
-    parser.add_argument('--headless', action='store_true', help='Run without viewer, print state to stdout')
-    parser.add_argument('--policy',   type=str,   default=None, help='Path to .onnx policy (overrides config)')
+    parser.add_argument('--headless',    action='store_true', help='Run without viewer, print state to stdout')
+    parser.add_argument('--stand_only', action='store_true', help='No policy — hold ref joint positions (standing pose only)')
+    parser.add_argument('--policy',     type=str,   default=None, help='Path to .onnx policy (overrides config)')
     parser.add_argument('--floor_friction', type=float, default=None, help='Floor sliding friction (default 1.0, carpet ~3.0)')
     parser.add_argument('--floor_aniso', action='store_true', help='Anisotropic floor friction (carpet-like)')
     args = parser.parse_args()
@@ -407,7 +418,7 @@ def main():
         cfg['floor_friction'] = args.floor_friction
     if args.floor_aniso:
         cfg['floor_aniso'] = True
-    run(cfg, cmd_vx=args.cmd_vx, cmd_vy=args.cmd_vy, cmd_yaw=args.cmd_yaw, duration=args.duration, headless=args.headless)
+    run(cfg, cmd_vx=args.cmd_vx, cmd_vy=args.cmd_vy, cmd_yaw=args.cmd_yaw, duration=args.duration, headless=args.headless, stand_only=args.stand_only)
 
 
 if __name__ == '__main__':
