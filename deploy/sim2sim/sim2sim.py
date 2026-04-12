@@ -209,7 +209,7 @@ class CommandInput:
             return
         pygame.event.pump()
         vx  = -self._joystick.get_axis(1)   # left stick Y  (push fwd = negative → negate)
-        vy  = -self._joystick.get_axis(0)   # left stick X  (push left = positive → negate)
+        vy  =  self._joystick.get_axis(0)   # left stick X  (push left = positive, no negate)
         yaw = -self._joystick.get_axis(3)   # right stick X (ax2 is LT trigger, not a stick)
         vx  = self._apply_deadzone(vx,  0.10)
         vy  = self._apply_deadzone(vy,  0.10)
