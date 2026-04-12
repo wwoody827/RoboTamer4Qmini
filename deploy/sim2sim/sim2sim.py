@@ -333,7 +333,9 @@ def build_mujoco_model(urdf_path, sim_dt, init_height=0.5, floor_friction=1.0, f
 # Main sim2sim loop
 # ---------------------------------------------------------------------------
 
-def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, duration=None, headless=False, stand_only=False, interactive=False):
+def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, duration=None, headless=False,
+        stand_only=False, interactive=False,
+        record_path=None, record_skill="walk", record_loop=True, record_skip=20):
     # Override commands if provided
     cmd_vx  = cmd_vx  if cmd_vx  is not None else cfg['cmd_vx']
     cmd_vy  = cmd_vy  if cmd_vy  is not None else cfg.get('cmd_vy', 0.0)
@@ -357,6 +359,13 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, duration=None, headless=Fal
     obs_hist    = cfg['obs_history']
     obs_dim     = cfg['num_obs_per_step']
     static_thr  = cfg['static_cmd_threshold']
+
+    # Detect task mode from action dimension:
+    #   BIRL: 12-dim (2 leg-freq + 10 joints)
+    #   MIRL: 10-dim (all joints, no freq outputs)
+    is_mirl = (len(act_low) == 10)
+    if is_mirl:
+        print("[sim2sim] Detected MIRL mode (10-dim action, 64-dim obs, no phase modulator)")
 
     # Interactive mode: always start from zero (joystick/keyboard is authoritative)
     cin = CommandInput(0.0, 0.0, 0.0) if (interactive and not headless) else None
@@ -414,46 +423,73 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, duration=None, headless=Fal
     for _ in range(obs_hist):
         obs_history.append(np.zeros(obs_dim, dtype=np.float32))
 
-    def get_obs():
-        """Build observation vector matching BIRLTask.pure_observation()."""
-        q     = data.qpos[QPOS_START:QPOS_START + NUM_JOINTS]
-        dq    = data.qvel[QVEL_START:QVEL_START + NUM_JOINTS]
-
-        # Training uses imu_in_torso body (fixed joint offset from base_link)
-        # xquat is [w, x, y, z] in MuJoCo
+    def _get_imu_state():
+        """Return (quat [w,x,y,z], base_ang_vel body-frame) from MuJoCo state."""
         if imu_body_id >= 0:
-            quat         = data.xquat[imu_body_id]       # [w, x, y, z]
-            world_angvel = data.cvel[imu_body_id][0:3]   # cvel: [ang(3), lin(3)]
+            quat         = data.xquat[imu_body_id]      # [w, x, y, z]
+            world_angvel = data.cvel[imu_body_id][0:3]  # cvel: [ang(3), lin(3)]
         else:
             quat         = data.qpos[3:7]
             world_angvel = data.qvel[3:6]
-
-        euler        = quat_to_euler_xyz(quat)   # [roll, pitch, yaw]
-        base_euler   = euler[:2]               # obs only uses roll, pitch
         base_ang_vel = quat_rotate_inverse(quat, world_angvel)
+        return quat, base_ang_vel
 
-        joint_pos_rel = q - ref_joint                              # relative to ref
+    def get_obs():
+        """Build observation vector matching BIRLTask.pure_observation() (44-dim)."""
+        q  = data.qpos[QPOS_START:QPOS_START + NUM_JOINTS]
+        dq = data.qvel[QVEL_START:QVEL_START + NUM_JOINTS]
+        quat, base_ang_vel = _get_imu_state()
+        euler        = quat_to_euler_xyz(quat)
+        base_euler   = euler[:2]
+        joint_pos_rel = q - ref_joint
         joint_vel_sc  = dq * 0.1
-        joint_pos_err = current_joint_act - q                      # action - pos
-
-        pm_phase_val  = np.concatenate([
-            np.sin(pm.phase),
-            np.cos(pm.phase),
-        ]) * static_flag
-
-        pm_f_val = (pm.frequency * 0.3 - 1.0) * static_flag
-
+        joint_pos_err = current_joint_act - q
+        pm_phase_val  = np.concatenate([np.sin(pm.phase), np.cos(pm.phase)]) * static_flag
+        pm_f_val      = (pm.frequency * 0.3 - 1.0) * static_flag
         obs = np.concatenate([
-            commands,          # 3: vx, vy, yaw
-            base_euler,        # 2: roll, pitch
-            base_ang_vel * 0.5,# 3: ang vel
-            joint_pos_rel,     # 10
-            joint_vel_sc,      # 10
-            joint_pos_err,     # 10
-            pm_phase_val,      # 4
-            pm_f_val,          # 2
+            commands,           # 3: vx, vy, yaw
+            base_euler,         # 2: roll, pitch
+            base_ang_vel * 0.5, # 3: ang vel
+            joint_pos_rel,      # 10
+            joint_vel_sc,       # 10
+            joint_pos_err,      # 10
+            pm_phase_val,       # 4
+            pm_f_val,           # 2
         ]).astype(np.float32)
+        obs = np.clip(obs, -3.0, 3.0)
+        return obs
 
+    def get_obs_mirl():
+        """Build observation vector matching MIRLTask.pure_observation() (64-dim).
+
+        Layout:
+          [0-7]   8 command slots: [vx, vy, yaw, 0, 0, 0, 0, 0]
+          [8-9]   roll, pitch
+          [10-12] angular velocity × 0.5
+          [13-22] joint_pos − ref_joint_pos
+          [23-32] joint_vel × 0.1
+          [33-42] joint_act − joint_pos  (tracking error)
+          [43-63] ref slots + phase_progress (zeros — no reference clip in sim2sim yet)
+        """
+        q  = data.qpos[QPOS_START:QPOS_START + NUM_JOINTS]
+        dq = data.qvel[QVEL_START:QVEL_START + NUM_JOINTS]
+        quat, base_ang_vel = _get_imu_state()
+        euler         = quat_to_euler_xyz(quat)
+        base_euler    = euler[:2]
+        joint_pos_rel = q - ref_joint
+        joint_vel_sc  = dq * 0.1
+        joint_pos_err = current_joint_act - q
+        commands_8    = np.array([commands[0], commands[1], commands[2],
+                                   0., 0., 0., 0., 0.], dtype=np.float32)
+        obs = np.concatenate([
+            commands_8,          # 8
+            base_euler,          # 2
+            base_ang_vel * 0.5,  # 3
+            joint_pos_rel,       # 10
+            joint_vel_sc,        # 10
+            joint_pos_err,       # 10
+            np.zeros(21, dtype=np.float32),  # ref slots + phase_progress
+        ]).astype(np.float32)
         obs = np.clip(obs, -3.0, 3.0)
         return obs
 
@@ -475,6 +511,11 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, duration=None, headless=Fal
     total_steps = int(duration / sim_dt)
     log_interval = int(1.0 / sim_dt)  # print every 1 simulated second
 
+    # Reference recording state (populated if record_path is set)
+    _rec = {"joint_pos": [], "joint_vel": [], "base_pos": [],
+            "base_quat": [], "base_lin_vel": [], "base_ang_vel": []}
+    _rec_skip_steps = record_skip  # skip first N policy steps to let robot settle
+
     print(f"\nRunning sim2sim: cmd_vx={cmd_vx:.2f} m/s, cmd_vy={cmd_vy:.2f} m/s, cmd_yaw={cmd_yaw:.2f} rad/s")
     print(f"Duration: {duration:.1f}s  |  Policy @ {1/policy_dt:.0f}Hz  |  Physics @ {1/sim_dt:.0f}Hz")
     print(f"{'time':>6}  {'x':>7}  {'y':>7}  {'z':>7}  {'roll':>7}  {'pitch':>7}  {'yaw':>7}  {'vx':>7}  {'vy':>7}")
@@ -495,16 +536,34 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, duration=None, headless=Fal
 
         if step % decimation == 0:
             if not stand_only:
-                obs_now = get_obs()
+                obs_now = get_obs_mirl() if is_mirl else get_obs()
                 obs_history.append(obs_now)
                 obs_stacked = np.concatenate(list(obs_history))[np.newaxis, :]
 
                 net_out = session.run(None, {input_name: obs_stacked})[0][0]
                 scaled = scale_transform(net_out, act_low, act_high)
-                pm.compute(scaled[:num_legs])
-                current_joint_act[:] += scaled[num_legs:] * policy_dt
+                if is_mirl:
+                    # All 10 outputs are joint position increments
+                    current_joint_act[:] += scaled * policy_dt
+                else:
+                    # BIRL: first num_legs outputs drive phase, rest are joint increments
+                    pm.compute(scaled[:num_legs])
+                    current_joint_act[:] += scaled[num_legs:] * policy_dt
                 current_joint_act[:] = np.clip(current_joint_act, jlim_low, jlim_high)
             static_flag = float(np.linalg.norm(commands) >= static_thr)
+
+            # Record reference frame at policy rate
+            if record_path is not None and not stand_only:
+                nonlocal _rec_skip_steps
+                if _rec_skip_steps > 0:
+                    _rec_skip_steps -= 1
+                else:
+                    _rec["joint_pos"].append(data.qpos[QPOS_START:QPOS_START + NUM_JOINTS].copy())
+                    _rec["joint_vel"].append(data.qvel[QVEL_START:QVEL_START + NUM_JOINTS].copy())
+                    _rec["base_pos"].append(data.qpos[0:3].copy())
+                    _rec["base_quat"].append(data.xquat[imu_body_id].copy())       # [w,x,y,z]
+                    _rec["base_lin_vel"].append(data.qvel[0:3].copy())              # world frame
+                    _rec["base_ang_vel"].append(data.cvel[imu_body_id][0:3].copy()) # body frame ang vel
 
         q  = data.qpos[QPOS_START:QPOS_START + NUM_JOINTS]
         dq = data.qvel[QVEL_START:QVEL_START + NUM_JOINTS]
@@ -549,6 +608,33 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, duration=None, headless=Fal
                     time.sleep(target - elapsed)
         print(f"Sim2Sim finished: {step * sim_dt:.1f}s simulated.")
 
+    # Save reference clip if requested
+    if record_path is not None and len(_rec["joint_pos"]) > 0:
+        _save_reference_clip(_rec, record_path, policy_dt, record_skill, record_loop)
+
+
+def _save_reference_clip(rec, path, dt, skill, loop):
+    """Save recorded frames as a reference clip .npz (MIRL format)."""
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    arrays = {k: np.array(v, dtype=np.float32) for k, v in rec.items()}
+    T = len(arrays["joint_pos"])
+    np.savez(
+        path,
+        joint_pos    = arrays["joint_pos"],    # [T, 10]
+        joint_vel    = arrays["joint_vel"],    # [T, 10]
+        base_pos     = arrays["base_pos"],     # [T, 3]
+        base_quat    = arrays["base_quat"],    # [T, 4]  [w,x,y,z]
+        base_lin_vel = arrays["base_lin_vel"], # [T, 3]
+        base_ang_vel = arrays["base_ang_vel"], # [T, 3]
+        dt           = np.float32(dt),
+        source       = np.bytes_("rollout"),
+        skill        = np.bytes_(skill),
+        loop         = np.bool_(loop),
+    )
+    duration = T * dt
+    print(f"\nReference clip saved: {path}")
+    print(f"  {T} frames  |  {duration:.1f}s  |  {1/dt:.0f}Hz  |  skill={skill}  loop={loop}")
+
 
 # ---------------------------------------------------------------------------
 # Entry point
@@ -566,7 +652,11 @@ def main():
     parser.add_argument('--policy',     type=str,   default=None, help='Path to .onnx policy (overrides config)')
     parser.add_argument('--floor_friction', type=float, default=None, help='Floor sliding friction (default 1.0, carpet ~3.0)')
     parser.add_argument('--floor_aniso', action='store_true', help='Anisotropic floor friction (carpet-like)')
-    parser.add_argument('--interactive', action='store_true', help='Live keyboard/joystick command input (W/S/A/D/Q/E/Space/R)')
+    parser.add_argument('--interactive', action='store_true', help='Live keyboard/joystick command input')
+    parser.add_argument('--record',       type=str,   default=None,   help='Save reference clip to this .npz path')
+    parser.add_argument('--record_skill', type=str,   default='walk', help='Skill label written into the clip (default: walk)')
+    parser.add_argument('--record_loop',  action='store_true',        help='Mark clip as cyclic/looping (default: False)')
+    parser.add_argument('--record_skip',  type=int,   default=20,     help='Skip first N policy steps before recording (default: 20 ≈ 0.3s)')
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -580,7 +670,9 @@ def main():
         cfg['floor_aniso'] = True
     run(cfg, cmd_vx=args.cmd_vx, cmd_vy=args.cmd_vy, cmd_yaw=args.cmd_yaw,
         duration=args.duration, headless=args.headless, stand_only=args.stand_only,
-        interactive=args.interactive)
+        interactive=args.interactive,
+        record_path=args.record, record_skill=args.record_skill,
+        record_loop=args.record_loop, record_skip=args.record_skip)
 
 
 if __name__ == '__main__':

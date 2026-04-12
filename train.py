@@ -71,7 +71,12 @@ def train():
     if sim2sim_interval > 0:
         sim2sim_config_path = getattr(args, 'sim2sim_config', None)
         if sim2sim_config_path is None:
-            sim2sim_config_path = 'deploy/sim2sim/configs/qmini_birl.yaml'
+            # Auto-select sim2sim config based on task type
+            task_cfg = getattr(cfg.task, 'cfg', 'BIRL')
+            if task_cfg.startswith('MIRL') or task_cfg == 'MIRL':
+                sim2sim_config_path = 'deploy/sim2sim/configs/qmini_mirl.yaml'
+            else:
+                sim2sim_config_path = 'deploy/sim2sim/configs/qmini_birl.yaml'
         if os.path.exists(sim2sim_config_path):
             with open(sim2sim_config_path, encoding='utf-8') as _f:
                 sim2sim_cfg = yaml.safe_load(_f)
