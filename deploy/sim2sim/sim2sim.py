@@ -8,11 +8,13 @@ Usage:
     python deploy/sim2sim/sim2sim.py [--config deploy/sim2sim/configs/qmini_birl.yaml]
                                      [--cmd_vx 0.5] [--cmd_yaw 0.0]
                                      [--duration 30]
+                                     [--interactive]   # keyboard / joystick control
 """
 
 import os
 import argparse
 import time
+import threading
 from collections import deque
 from math import tau
 
@@ -21,6 +23,13 @@ import mujoco
 import mujoco.viewer
 import onnxruntime as ort
 import yaml
+
+# Optional pygame for joystick support
+try:
+    import pygame
+    _PYGAME_OK = True
+except ImportError:
+    _PYGAME_OK = False
 
 # ---------------------------------------------------------------------------
 # Phase modulator (mirrors env/utils/phase_modulator.py)
@@ -91,6 +100,129 @@ def scale_transform(action, low, high, clip_val=1.0):
     """Matches env/utils/math.py scale_transform."""
     action = np.clip(action, -clip_val, clip_val)
     return (action + 1.0) / 2.0 * (high - low) + low
+
+
+# ---------------------------------------------------------------------------
+# Interactive command input (keyboard via MuJoCo key_callback + joystick via pygame)
+# ---------------------------------------------------------------------------
+
+class CommandInput:
+    """
+    Live command input — no conflict with MuJoCo hotkeys.
+
+    Two input modes (automatically selected):
+      1. Joystick via pygame (if connected):
+            Left stick Y  → cmd_vx   (push forward = positive)
+            Left stick X  → cmd_vy   (push left    = positive)
+            Right stick X → cmd_yaw
+            Button 0      → reset robot
+
+      2. Arrow keys via MuJoCo key_callback (fallback — safe, no MuJoCo conflicts):
+            ↑ / ↓         cmd_vx  +/- 0.1 m/s
+            ← / →         cmd_vy  +/- 0.1 m/s  (← = left/+vy, → = right/-vy)
+            PgUp / PgDn   cmd_yaw +/- 0.2 rad/s
+            Delete        stop (zero all)
+            End           reset robot
+    """
+    # GLFW key codes — arrow/nav keys not bound by MuJoCo viewer
+    _KEY_UP    = 265
+    _KEY_DOWN  = 264
+    _KEY_LEFT  = 263
+    _KEY_RIGHT = 262
+    _KEY_PGUP  = 266
+    _KEY_PGDN  = 267
+    _KEY_DEL   = 261   # stop
+    _KEY_END   = 269   # reset
+
+    _VX_STEP   = 0.1
+    _VY_STEP   = 0.1
+    _YAW_STEP  = 0.2
+    _VX_RANGE  = (-0.5, 0.7)
+    _VY_RANGE  = (-0.3, 0.3)
+    _YAW_RANGE = (-1.0, 1.0)
+
+    def __init__(self, cmd_vx=0.0, cmd_vy=0.0, cmd_yaw=0.0):
+        self.cmd_vx  = cmd_vx
+        self.cmd_vy  = cmd_vy
+        self.cmd_yaw = cmd_yaw
+        self._reset_requested = False
+        self._lock = threading.Lock()
+
+        # Try joystick first
+        self._joystick = None
+        if _PYGAME_OK:
+            pygame.init()
+            pygame.joystick.init()
+            if pygame.joystick.get_count() > 0:
+                self._joystick = pygame.joystick.Joystick(0)
+                self._joystick.init()
+                print(f"[input] Joystick: {self._joystick.get_name()} — using joystick mode")
+                self._print_joystick_help()
+                return
+
+        # Fallback: arrow keys via MuJoCo key_callback
+        self._print_keyboard_help()
+
+    def _print_joystick_help(self):
+        print("\n=== Joystick Control ===")
+        print("  Left stick Y   cmd_vx  (forward/back)")
+        print("  Left stick X   cmd_vy  (left/right strafe)")
+        print("  Right stick X  cmd_yaw (turn)")
+        print("  Button 0       reset robot\n")
+
+    def _print_keyboard_help(self):
+        print("\n=== Keyboard Control (MuJoCo window must have focus) ===")
+        print("  ↑ / ↓          cmd_vx  +/-0.1 m/s  (forward/back)")
+        print("  ← / →          cmd_vy  +/-0.1 m/s  (strafe left/right)")
+        print("  PgUp / PgDn    cmd_yaw +/-0.2 rad/s (turn)")
+        print("  Delete         stop (zero all commands)")
+        print("  End            reset robot to start\n")
+
+    def key_callback(self, keycode):
+        """Called by MuJoCo viewer — arrow/nav keys only, no conflicts."""
+        changed = True
+        with self._lock:
+            if   keycode == self._KEY_UP:    self.cmd_vx  = float(np.clip(self.cmd_vx  + self._VX_STEP,  *self._VX_RANGE))
+            elif keycode == self._KEY_DOWN:  self.cmd_vx  = float(np.clip(self.cmd_vx  - self._VX_STEP,  *self._VX_RANGE))
+            elif keycode == self._KEY_LEFT:  self.cmd_vy  = float(np.clip(self.cmd_vy  + self._VY_STEP,  *self._VY_RANGE))
+            elif keycode == self._KEY_RIGHT: self.cmd_vy  = float(np.clip(self.cmd_vy  - self._VY_STEP,  *self._VY_RANGE))
+            elif keycode == self._KEY_PGUP:  self.cmd_yaw = float(np.clip(self.cmd_yaw + self._YAW_STEP, *self._YAW_RANGE))
+            elif keycode == self._KEY_PGDN:  self.cmd_yaw = float(np.clip(self.cmd_yaw - self._YAW_STEP, *self._YAW_RANGE))
+            elif keycode == self._KEY_DEL:   self.cmd_vx = self.cmd_vy = self.cmd_yaw = 0.0
+            elif keycode == self._KEY_END:   self._reset_requested = True
+            else: changed = False
+            vx, vy, yaw = self.cmd_vx, self.cmd_vy, self.cmd_yaw
+        if changed:
+            print(f"\r[cmd] vx={vx:+.1f}  vy={vy:+.1f}  yaw={yaw:+.1f}    ", end='', flush=True)
+
+    def update_joystick(self):
+        """Poll joystick axes each physics step (no-op if no joystick)."""
+        if self._joystick is None:
+            return
+        pygame.event.pump()
+        vx  = -self._joystick.get_axis(1)
+        vy  = -self._joystick.get_axis(0)
+        yaw = -self._joystick.get_axis(2)
+        vx  = 0.0 if abs(vx)  < 0.05 else vx
+        vy  = 0.0 if abs(vy)  < 0.05 else vy
+        yaw = 0.0 if abs(yaw) < 0.05 else yaw
+        reset = any(self._joystick.get_button(i) for i in range(min(self._joystick.get_numbuttons(), 1)))
+        with self._lock:
+            self.cmd_vx  = float(np.clip(vx  * 0.7, *self._VX_RANGE))
+            self.cmd_vy  = float(np.clip(vy  * 0.3, *self._VY_RANGE))
+            self.cmd_yaw = float(np.clip(yaw * 1.0, *self._YAW_RANGE))
+            if reset:
+                self._reset_requested = True
+
+    def get(self):
+        with self._lock:
+            return self.cmd_vx, self.cmd_vy, self.cmd_yaw
+
+    def pop_reset(self):
+        with self._lock:
+            r = self._reset_requested
+            self._reset_requested = False
+        return r
 
 
 # ---------------------------------------------------------------------------
@@ -193,7 +325,7 @@ def build_mujoco_model(urdf_path, sim_dt, init_height=0.5, floor_friction=1.0, f
 # Main sim2sim loop
 # ---------------------------------------------------------------------------
 
-def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, duration=None, headless=False, stand_only=False):
+def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, duration=None, headless=False, stand_only=False, interactive=False):
     # Override commands if provided
     cmd_vx  = cmd_vx  if cmd_vx  is not None else cfg['cmd_vx']
     cmd_vy  = cmd_vy  if cmd_vy  is not None else cfg.get('cmd_vy', 0.0)
@@ -220,6 +352,9 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, duration=None, headless=Fal
 
     commands = np.array([cmd_vx, cmd_vy, cmd_yaw], dtype=np.float32)
     static_flag = float(np.linalg.norm(commands) >= static_thr)
+
+    # Interactive input controller
+    cin = CommandInput(cmd_vx, cmd_vy, cmd_yaw) if (interactive and not headless) else None
 
     # Load ONNX policy (skip if stand_only)
     if stand_only:
@@ -336,6 +471,18 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, duration=None, headless=Fal
 
     def _physics_step():
         nonlocal step, static_flag
+        # Update commands from interactive input
+        if cin is not None:
+            cin.update_joystick()
+            if cin.pop_reset():
+                mujoco.mj_resetData(model, data)
+                data.qpos[QPOS_START:QPOS_START + NUM_JOINTS] = ref_joint
+                current_joint_act[:] = ref_joint.copy()
+                pm.reset()
+                mujoco.mj_forward(model, data)
+            vx, vy, yaw = cin.get()
+            commands[0] = vx; commands[1] = vy; commands[2] = yaw
+
         if step % decimation == 0:
             if not stand_only:
                 obs_now = get_obs()
@@ -364,19 +511,21 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, duration=None, headless=Fal
                 x, y, z = data.qpos[0], data.qpos[1], data.qpos[2]
                 quat = data.xquat[imu_body_id]  # [w,x,y,z]
                 euler = quat_to_euler_xyz(quat)
-                vx = data.qvel[0]
-                vy = data.qvel[1]
-                print(f"{t:6.1f}  {x:7.3f}  {y:7.3f}  {z:7.3f}  "
+                vx_act = data.qvel[0]
+                vy_act = data.qvel[1]
+                cmd_str = f"cmd=[{commands[0]:+.1f},{commands[1]:+.1f},{commands[2]:+.1f}]" if cin else ""
+                print(f"\n{t:6.1f}  {x:7.3f}  {y:7.3f}  {z:7.3f}  "
                       f"{np.degrees(euler[0]):7.2f}  {np.degrees(euler[1]):7.2f}  "
                       f"{np.degrees(euler[2]):7.2f}  "
-                      f"{vx:7.3f}  {vy:7.3f}")
+                      f"{vx_act:7.3f}  {vy_act:7.3f}  {cmd_str}")
 
     if headless:
         while step < total_steps:
             _physics_step()
         print(f"\nSim2Sim finished: {step * sim_dt:.1f}s simulated.")
     else:
-        with mujoco.viewer.launch_passive(model, data) as viewer:
+        key_cb = cin.key_callback if cin is not None else None
+        with mujoco.viewer.launch_passive(model, data, key_callback=key_cb) as viewer:
             viewer.cam.azimuth   = 90
             viewer.cam.elevation = -20
             viewer.cam.distance  = 3.0
@@ -407,6 +556,7 @@ def main():
     parser.add_argument('--policy',     type=str,   default=None, help='Path to .onnx policy (overrides config)')
     parser.add_argument('--floor_friction', type=float, default=None, help='Floor sliding friction (default 1.0, carpet ~3.0)')
     parser.add_argument('--floor_aniso', action='store_true', help='Anisotropic floor friction (carpet-like)')
+    parser.add_argument('--interactive', action='store_true', help='Live keyboard/joystick command input (W/S/A/D/Q/E/Space/R)')
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -418,7 +568,9 @@ def main():
         cfg['floor_friction'] = args.floor_friction
     if args.floor_aniso:
         cfg['floor_aniso'] = True
-    run(cfg, cmd_vx=args.cmd_vx, cmd_vy=args.cmd_vy, cmd_yaw=args.cmd_yaw, duration=args.duration, headless=args.headless, stand_only=args.stand_only)
+    run(cfg, cmd_vx=args.cmd_vx, cmd_vy=args.cmd_vy, cmd_yaw=args.cmd_yaw,
+        duration=args.duration, headless=args.headless, stand_only=args.stand_only,
+        interactive=args.interactive)
 
 
 if __name__ == '__main__':
