@@ -435,7 +435,10 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, duration=None, headless=Fal
         return quat, base_ang_vel
 
     def get_obs():
-        """Build observation vector matching BIRLTask.pure_observation() (44-dim)."""
+        """Build BIRL observation vector.
+        44-dim (current): [cmd_vx, cmd_vy, cmd_yaw, roll, pitch, ang_vel×3, jp×10, jv×10, jerr×10, phase×4, freq×2]
+        43-dim (legacy):  same but without cmd_vy — for checkpoints trained pre-April 2026.
+        """
         q  = data.qpos[QPOS_START:QPOS_START + NUM_JOINTS]
         dq = data.qvel[QVEL_START:QVEL_START + NUM_JOINTS]
         quat, base_ang_vel = _get_imu_state()
@@ -446,8 +449,10 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, duration=None, headless=Fal
         joint_pos_err = current_joint_act - q
         pm_phase_val  = np.concatenate([np.sin(pm.phase), np.cos(pm.phase)]) * static_flag
         pm_f_val      = (pm.frequency * 0.3 - 1.0) * static_flag
+        # Legacy 43-dim: only [cmd_vx, cmd_yaw] (no cmd_vy slot)
+        cmd_slot = np.array([commands[0], commands[2]], dtype=np.float32) if obs_dim == 43 else commands
         obs = np.concatenate([
-            commands,           # 3: vx, vy, yaw
+            cmd_slot,           # 2 (legacy) or 3 (current)
             base_euler,         # 2: roll, pitch
             base_ang_vel * 0.5, # 3: ang vel
             joint_pos_rel,      # 10

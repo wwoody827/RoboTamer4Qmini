@@ -1,0 +1,48 @@
+# Sim2Sim config for legacy BIRL checkpoints trained with 43-dim obs (pre-April 2026).
+# Use this for carpet_v8 and earlier checkpoints.
+
+policy_path: "experiments/q2/deploy/policy.onnx"
+urdf_path: "assets/q1/urdf/q1.urdf"
+
+# Simulation
+simulation_duration: 30.0   # seconds
+simulation_dt: 0.001        # 1000 Hz physics
+control_decimation: 15      # 67 Hz policy (matches training)
+
+# Initial state
+init_height: 0.5            # m above ground
+
+# Commands (fixed for sim2sim)
+cmd_vx: 0.5                 # m/s forward velocity
+cmd_vy: 0.0                 # m/s lateral velocity
+cmd_yaw: 0.0                # rad/s yaw rate
+
+# Reference joint positions (standing pose)
+# Order: hip_yaw_l, hip_roll_l, hip_pitch_l, knee_pitch_l, ankle_pitch_l,
+#        hip_yaw_r, hip_roll_r, hip_pitch_r, knee_pitch_r, ankle_pitch_r
+ref_joint_pos: [0.4, -0.1, -1.5, 1.0, -1.3, -0.4, 0.1, 1.5, -1.0, 1.3]
+
+# PD gains (from config/Base.py)
+kps: [55., 105., 75., 45., 30., 55., 105., 75., 45., 30.]
+kds: [0.3,  2.5, 0.3,  0.5, 0.25, 0.3, 2.5, 0.3, 0.5, 0.25]
+
+# Torque correction terms (from legged_robot.py)
+joint_tor_offset: [0.6, 1.0, 0.0, 0.7, 0.0, -0.6, -1.0, 0.0, -0.7, 0.0]
+joint_vel_sign:   [0.0, 1.0, 0.0, 0.0, 0.0,  0.0,  1.0, 0.0,  0.0, 0.0]
+
+# Action scaling (increment mode, from config/BIRL.py)
+action_inc_low:  [0.5, 0.5, -15., -15., -15., -15., -15., -15., -15., -15., -15., -15.]
+action_inc_high: [3.5, 3.5,  15.,  15.,  15.,  15.,  15.,  15.,  15.,  15.,  15.,  15.]
+
+# Joint limits (from URDF)
+joint_limit_low:  [-0.1, -0.3, -2.1,  0.0, -2.5, -0.7, -0.6,  0.0, -2.1,  0.0]
+joint_limit_high: [ 0.7,  0.6,  0.0,  2.1,  0.0,  0.1,  0.3,  2.1,  0.0,  2.5]
+
+# Observation
+num_obs_per_step: 43
+obs_history: 3              # stacked frames
+
+# Phase modulator
+num_legs: 2
+static_cmd_threshold: 0.15  # |cmd| < threshold → static_flag = 0
+convert_phi: 3.769911184    # 1.2 * pi

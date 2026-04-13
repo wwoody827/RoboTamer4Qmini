@@ -59,6 +59,11 @@ class MIRLTask(BIRLTask):
         self.foot_swing_mask = (self.env.foot_frc < 1.0)
         self.foot_support_mask = (self.env.foot_frc >= 10.0)
 
+        # Air time tracking: accumulate time each foot spends in swing phase
+        self.foot_air_time = torch.zeros(self.num_envs, self.num_legs, dtype=torch.float, device=self.device)
+        self._pre_reset_air_time = torch.zeros(self.num_envs, self.num_legs, dtype=torch.float, device=self.device)
+        self._prev_foot_swing_mask = torch.zeros(self.num_envs, self.num_legs, dtype=torch.bool, device=self.device)
+
         # Reference clip state (populated by _load_ref_clips if paths provided)
         self._has_ref = False
         self._ref_joint_pos_now = torch.zeros(self.num_envs, 10, dtype=torch.float, device=self.device)
@@ -231,6 +236,7 @@ class MIRLTask(BIRLTask):
         self._resample_commands(env_ids)
         self.foot_swing_mask = (self.env.foot_frc < 1.0)
         self.foot_support_mask = (self.env.foot_frc >= 10.0)
+        self.foot_air_time[env_ids] = 0.0
         # RSI: assign new clip and randomise start frame for reset envs
         if self._has_ref:
             self._assign_ref_clips(env_ids)
@@ -241,6 +247,12 @@ class MIRLTask(BIRLTask):
         # Override foot masks from contact forces
         self.foot_swing_mask = (self.env.foot_frc < 1.0)
         self.foot_support_mask = (self.env.foot_frc >= 10.0)
+        # Accumulate air time while foot is in swing; reset on touchdown.
+        # Save previous swing mask to detect touchdown in reward().
+        self._prev_foot_swing_mask = self.foot_swing_mask.clone()
+        self.foot_air_time += self.env.dt
+        self._pre_reset_air_time = self.foot_air_time.clone()  # snapshot before reset
+        self.foot_air_time *= self.foot_swing_mask.float()     # reset to 0 on contact
         # Advance reference frame
         self._advance_ref_frames()
 
@@ -544,6 +556,15 @@ class MIRLTask(BIRLTask):
                 dim=1, keepdim=True
             ) * self.static_flag
         )
+
+        # Air time reward: fires at touchdown, proportional to how long foot was airborne.
+        # Directly discourages high-frequency shuffling — robot must commit to full strides.
+        # Gated by static_flag so it doesn't fire when standing still.
+        just_landed = self._prev_foot_swing_mask & self.foot_support_mask  # swing→support transition
+        air_time_rew = torch.sum(
+            (self._pre_reset_air_time - 0.1).clip(min=0.) * just_landed.float(),
+            dim=1, keepdim=True
+        ) * self.static_flag
 
         # Mechanical power penalty: |torque × joint_vel| — minimizes energy consumption.
         # Also naturally reduces step frequency (rapid shuffling wastes power).
