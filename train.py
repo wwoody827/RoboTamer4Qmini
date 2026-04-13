@@ -31,7 +31,12 @@ def train():
     cfg = getattr(importlib.import_module('.'.join(['config', args.config])), args.config)
     cfg = update_cfg_from_args(cfg, args)
     cfg.runner.num_envs = args.num_envs if args.num_envs is not None else cfg.runner.num_envs
-    exp_dir = join('experiments', args.name)
+    # Prefix with datetime unless resuming (resume must use the original name as-is)
+    if args.resume is None:
+        exp_name = time.strftime('%Y%m%d_%H%M') + '_' + args.name
+    else:
+        exp_name = args.name
+    exp_dir = join('experiments', exp_name)
     model_dir = join(exp_dir, 'model')
     os.makedirs(model_dir, exist_ok=True)
     all_model_dir = join(exp_dir, 'model', 'all')
@@ -233,7 +238,7 @@ def train():
             for name, val in zip(gym_env.task.rew_names, rew_component_mean.cpu().tolist()):
                 writer.add_scalar(f'4:Rewards/{name}', val, it)
 
-        print(f"{args.name}#{it}:",
+        print(f"{exp_name}#{it}:",
               f"{'t'} {total_time / 60:.1f}m({iteration_time:.1f}s)",
               f"col {collection_time:.2f}s",
               f"lnt {learn_time:.2f}s",
