@@ -105,6 +105,8 @@ def train():
         alg.actor.load_state_dict(saved_model_state_dict['actor'])
         alg.critic.load_state_dict(saved_model_state_dict['critic'])
         alg.optimizer.load_state_dict(saved_model_state_dict['optimizer'])
+        if 'learning_rate' in saved_model_state_dict:
+            alg.learning_rate = saved_model_state_dict['learning_rate']
         current_learning_iteration = saved_model_state_dict['iteration']
     else:
         current_learning_iteration = 1
@@ -155,6 +157,7 @@ def train():
             'actor': alg.actor.state_dict(),
             'critic': alg.critic.state_dict(),
             'optimizer': alg.optimizer.state_dict(),
+            'learning_rate': alg.learning_rate,
             'iteration': it,
         }
         try:
