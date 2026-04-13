@@ -87,6 +87,9 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
     data.qpos[QPOS_START:QPOS_START + NUM_JOINTS] = ref_joint
     mujoco.mj_forward(model, data)
 
+    # Auto-detect mode: MIRL = 10-dim action (no freq outputs), BIRL = 12-dim
+    is_mirl = (len(act_low) == 10)
+
     pm = PhaseModulator(dt=policy_dt, num_legs=num_legs)
     pm.reset()
     current_joint_act = ref_joint.copy()
@@ -94,24 +97,46 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
     for _ in range(obs_hist):
         obs_history.append(np.zeros(obs_dim, dtype=np.float32))
 
-    def get_obs():
-        q  = data.qpos[QPOS_START:QPOS_START + NUM_JOINTS]
-        dq = data.qvel[QVEL_START:QVEL_START + NUM_JOINTS]
+    def _imu_state():
         if imu_body_id >= 0:
             quat         = data.xquat[imu_body_id]
             world_angvel = data.cvel[imu_body_id][0:3]
         else:
             quat         = data.qpos[3:7]
             world_angvel = data.qvel[3:6]
-        euler        = quat_to_euler_xyz(quat)
-        base_euler   = euler[:2]
-        base_ang_vel = quat_rotate_inverse(quat, world_angvel)
+        return quat, quat_rotate_inverse(quat, world_angvel)
+
+    def get_obs():
+        """BIRL obs: 44-dim with phase modulator."""
+        q  = data.qpos[QPOS_START:QPOS_START + NUM_JOINTS]
+        dq = data.qvel[QVEL_START:QVEL_START + NUM_JOINTS]
+        quat, base_ang_vel = _imu_state()
+        base_euler   = quat_to_euler_xyz(quat)[:2]
         pm_phase_val = np.concatenate([np.sin(pm.phase), np.cos(pm.phase)]) * static_flag
         pm_f_val     = (pm.frequency * 0.3 - 1.0) * static_flag
         obs = np.concatenate([
             commands, base_euler, base_ang_vel * 0.5,
             q - ref_joint, dq * 0.1, current_joint_act - q,
             pm_phase_val, pm_f_val,
+        ]).astype(np.float32)
+        return np.clip(obs, -3.0, 3.0)
+
+    def get_obs_mirl():
+        """MIRL obs: 64-dim with 8 command slots, no phase modulator."""
+        q  = data.qpos[QPOS_START:QPOS_START + NUM_JOINTS]
+        dq = data.qvel[QVEL_START:QVEL_START + NUM_JOINTS]
+        quat, base_ang_vel = _imu_state()
+        base_euler    = quat_to_euler_xyz(quat)[:2]
+        commands_8    = np.array([commands[0], commands[1], commands[2],
+                                   0., 0., 0., 0., 0.], dtype=np.float32)
+        obs = np.concatenate([
+            commands_8,          # 8
+            base_euler,          # 2
+            base_ang_vel * 0.5,  # 3
+            q - ref_joint,       # 10
+            dq * 0.1,            # 10
+            current_joint_act - q,  # 10
+            np.zeros(21, dtype=np.float32),  # ref slots + phase_progress
         ]).astype(np.float32)
         return np.clip(obs, -3.0, 3.0)
 
@@ -133,13 +158,16 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
 
     for step in range(total_steps):
         if step % decimation == 0:
-            obs_now = get_obs()
+            obs_now = get_obs_mirl() if is_mirl else get_obs()
             obs_history.append(obs_now)
             obs_stacked = np.concatenate(list(obs_history))[np.newaxis, :]
             net_out = session.run(None, {input_name: obs_stacked})[0][0]
             scaled  = scale_transform(net_out, act_low, act_high)
-            pm.compute(scaled[:num_legs])
-            current_joint_act[:] += scaled[num_legs:] * policy_dt
+            if is_mirl:
+                current_joint_act[:] += scaled * policy_dt
+            else:
+                pm.compute(scaled[:num_legs])
+                current_joint_act[:] += scaled[num_legs:] * policy_dt
             current_joint_act[:] = np.clip(current_joint_act, jlim_low, jlim_high)
             static_flag = float(np.linalg.norm(commands) >= static_thr)
 

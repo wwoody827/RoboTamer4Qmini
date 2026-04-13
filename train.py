@@ -155,7 +155,7 @@ def train():
             'actor': alg.actor.state_dict(),
             'critic': alg.critic.state_dict(),
             'optimizer': alg.optimizer.state_dict(),
-            'iteration': current_learning_iteration,
+            'iteration': it,
         }
         try:
             torch.save(saved_model_state_dict, join(model_dir, 'policy.pt'))
