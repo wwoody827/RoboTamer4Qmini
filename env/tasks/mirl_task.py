@@ -547,8 +547,9 @@ class MIRLTask(BIRLTask):
 
         # Mechanical power penalty: |torque × joint_vel| — minimizes energy consumption.
         # Also naturally reduces step frequency (rapid shuffling wastes power).
+        # Uses self.env.torques (commanded PD torques) — react_tau is zero in headless mode.
         power_rew = (
-            -torch.sum(torch.abs(self.env.react_tau * self.env.joint_vel), dim=1, keepdim=True)
+            -torch.sum(torch.abs(self.env.torques * self.env.joint_vel), dim=1, keepdim=True)
             / 100.
         )
 
@@ -594,7 +595,7 @@ class MIRLTask(BIRLTask):
             feet_py        = foot_py_rew * balance_rew * 0.5,
             feet_frc       = feet_contact_frc_rew * 0.001,
             joint_tor      = joint_tor_rew * 0.001,
-            power          = power_rew * 0.01,
+            power          = power_rew * 0.1,
         )
 
         # Imitation rewards (only active when reference clips are loaded)
