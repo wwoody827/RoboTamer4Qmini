@@ -67,6 +67,12 @@ class Base:
         inc_high_ranges = [10.] * 10
         inc_low_ranges = [-10.] * 10
 
+        # Actuator lag simulation (sim-to-real gap mitigation)
+        use_actuator_delay          = False
+        actuator_delay_range        = [1, 3]      # policy steps; re-randomised every 200 steps
+        use_actuator_filter         = False
+        actuator_filter_alpha_range = [0.3, 0.7]  # per-env, re-randomised at reset; higher = more lag
+
     class pd_gains(SetDict2Class):
         decimation = 15
         stiffness = {'hip_yaw': 55., 'hip_roll': 105., 'hip_pitch': 75., 'knee': 45., 'ankle': 30.}
@@ -121,6 +127,7 @@ class Base:
         num_commands = 4
         resampling_time = 5.  # time before command are changed[s]
         heading_command = False  # if true: compute ang vel command from heading error
+        use_heading_reward = False  # penalise cumulative yaw drift when cmd_yaw ≈ 0
 
         lin_vel_x_range = [-0.3, 0.7]
         lin_vel_y_range = [-0.3, 0.3]

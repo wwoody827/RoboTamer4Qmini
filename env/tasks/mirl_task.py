@@ -227,7 +227,7 @@ class MIRLTask(BIRLTask):
         self.joint_pos[env_ids] = self.env.joint_pos_his.delay(self.delay_joint_steps)[env_ids]
         self.current_joint_act[env_ids] = self.env.default_dof_pos
         self.previous_joint_act[env_ids] = self.current_joint_act[env_ids].clone()
-        self.joint_pos_error = self.current_joint_act - self.joint_pos
+        self.joint_pos_error = self.joint_act_for_pd - self.joint_pos
         self.static_flag = torch.where(
             torch.norm(self.commands[:, :3], dim=1, keepdim=True) < 0.15, False, True
         ).float()
@@ -237,6 +237,10 @@ class MIRLTask(BIRLTask):
         self.foot_swing_mask = (self.env.foot_frc < 1.0)
         self.foot_support_mask = (self.env.foot_frc >= 10.0)
         self.foot_air_time[env_ids] = 0.0
+        self.joint_act_for_pd[env_ids] = self.current_joint_act[env_ids]
+        if self._use_act_filter:
+            _alpha_range = self.cfg.action.actuator_filter_alpha_range
+            self.act_filter_alpha[env_ids] = torch.FloatTensor(len(env_ids), 1).uniform_(*_alpha_range).to(self.device)
         # RSI: assign new clip and randomise start frame for reset envs
         if self._has_ref:
             self._assign_ref_clips(env_ids)
@@ -327,7 +331,20 @@ class MIRLTask(BIRLTask):
         )
         self.action_history.append(self.current_joint_act.clone())
         self.previous_joint_act = self.current_joint_act.clone()
-        return self.current_joint_act
+
+        # --- actuator lag (same as BIRLTask) ---
+        if self._use_act_delay:
+            delayed = self.action_history[-(self._act_delay_steps + 1)]
+        else:
+            delayed = self.current_joint_act
+
+        if self._use_act_filter:
+            self.joint_act_for_pd = self.act_filter_alpha * self.joint_act_for_pd + (1. - self.act_filter_alpha) * delayed
+        else:
+            self.joint_act_for_pd = delayed
+        # ----------------------------------------
+
+        return self.joint_act_for_pd
 
     # ------------------------------------------------------------------
     # Reward
