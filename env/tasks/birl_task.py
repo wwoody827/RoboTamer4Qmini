@@ -82,8 +82,9 @@ class BIRLTask(BaseTask):
         self._use_act_delay  = getattr(self.cfg.action, 'use_actuator_delay',  False)
         self._use_act_filter = getattr(self.cfg.action, 'use_actuator_filter', False)
 
-        _delay_max = max(self.cfg.action.actuator_delay_range) if self._use_act_delay else 0
-        self._act_delay_steps = random.randint(*self.cfg.action.actuator_delay_range) if self._use_act_delay else 0
+        _delay_range = getattr(self.cfg.action, 'actuator_delay_range', [1, 3])
+        _delay_max = max(_delay_range) if self._use_act_delay else 0
+        self._act_delay_steps = random.randint(*_delay_range) if self._use_act_delay else 0
 
         self.action_history = deque(maxlen=3 + _delay_max)
         self.net_out_history = deque(maxlen=3)
@@ -94,7 +95,7 @@ class BIRLTask(BaseTask):
         # joint_act_for_pd: what actually gets sent to the PD controller (after delay + filter)
         self.joint_act_for_pd = self.current_joint_act.clone()
         if self._use_act_filter:
-            _alpha_range = self.cfg.action.actuator_filter_alpha_range
+            _alpha_range = getattr(self.cfg.action, 'actuator_filter_alpha_range', [0.3, 0.7])
             self.act_filter_alpha = torch.FloatTensor(self.num_envs, 1).uniform_(*_alpha_range).to(self.device)
         else:
             self.act_filter_alpha = None
@@ -172,7 +173,7 @@ class BIRLTask(BaseTask):
         self.heading_ref[env_ids] = self.env.base_euler[env_ids, 2].unsqueeze(-1)
         self.joint_act_for_pd[env_ids] = self.current_joint_act[env_ids]
         if self._use_act_filter:
-            _alpha_range = self.cfg.action.actuator_filter_alpha_range
+            _alpha_range = getattr(self.cfg.action, 'actuator_filter_alpha_range', [0.3, 0.7])
             self.act_filter_alpha[env_ids] = torch.FloatTensor(len(env_ids), 1).uniform_(*_alpha_range).to(self.device)
 
     def step(self):
@@ -216,7 +217,7 @@ class BIRLTask(BaseTask):
             self.delay_angle_steps = random.randint(self.cfg.domain_rand.delay_angle_ranges[0],
                                                     self.cfg.domain_rand.delay_angle_ranges[1])
         if self._use_act_delay and self.env.common_step_counter % 200 == 0:
-            self._act_delay_steps = random.randint(*self.cfg.action.actuator_delay_range)
+            self._act_delay_steps = random.randint(*getattr(self.cfg.action, 'actuator_delay_range', [1, 3]))
 
 
     def observation(self):

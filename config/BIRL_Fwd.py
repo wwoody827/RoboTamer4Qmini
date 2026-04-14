@@ -31,11 +31,15 @@ class BIRL_Fwd(Base):
         inc_high_ranges = [3.5] * 2 + [15.] * 10
         inc_low_ranges  = [0.5] * 2 + [-15.] * 10
 
+        use_actuator_delay          = True
+        use_actuator_filter         = True
+
     class command(SetDict2Class):
         curriculum        = False
         num_commands      = 3
         resampling_time   = 5.
         heading_command   = False
+        use_heading_reward = False
 
         # Forward/backward only — zero lateral and yaw
         lin_vel_x_range   = [-0.3, 0.7]

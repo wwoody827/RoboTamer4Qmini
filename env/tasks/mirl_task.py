@@ -239,7 +239,7 @@ class MIRLTask(BIRLTask):
         self.foot_air_time[env_ids] = 0.0
         self.joint_act_for_pd[env_ids] = self.current_joint_act[env_ids]
         if self._use_act_filter:
-            _alpha_range = self.cfg.action.actuator_filter_alpha_range
+            _alpha_range = getattr(self.cfg.action, 'actuator_filter_alpha_range', [0.3, 0.7])
             self.act_filter_alpha[env_ids] = torch.FloatTensor(len(env_ids), 1).uniform_(*_alpha_range).to(self.device)
         # RSI: assign new clip and randomise start frame for reset envs
         if self._has_ref:
