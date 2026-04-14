@@ -94,6 +94,8 @@ class BIRLTask(BaseTask):
         self.foot_swing_mask = torch.logical_not(self.foot_support_mask)
         self.pm_f = self.phase_modulator.frequency.clone()
 
+        self.heading_ref = torch.zeros(self.num_envs, 1, dtype=torch.float, device=self.device)
+
         self.last_foot_frc = torch.zeros(self.num_envs, self.num_legs, dtype=torch.float, device=self.device,
                                          requires_grad=False)
         self.foot_frc_acc = torch.zeros(self.num_envs, self.num_legs, dtype=torch.float, device=self.device,
@@ -153,8 +155,7 @@ class BIRLTask(BaseTask):
         self.foot_support_mask = torch.logical_and(foot_support_mask_1, foot_support_mask_2)
         self.foot_swing_mask = torch.logical_not(self.foot_support_mask)
         self.pm_f = self.phase_modulator.frequency.clone()
-
-
+        self.heading_ref[env_ids] = self.env.base_euler[env_ids, 2].unsqueeze(-1)
 
     def step(self):
 
@@ -393,6 +394,10 @@ class BIRLTask(BaseTask):
         foot_phase_rew += -torch.norm(lcos[:, [0]] + lcos[:, [1]], dim=1, keepdim=True) ** 2
         foot_phase_rew *= self.static_flag
 
+        heading_err = wrap_to_pi(self.env.base_euler[:, [2]] - self.heading_ref)
+        heading_rew = torch.exp(-3.0 * heading_err ** 2)
+        heading_rew *= (self.commands[:, [2]].abs() < 0.05).float() * self.static_flag
+
         rew_dict = dict(
             constant=constant_rew * 0.3,
             base_heit=base_heit_rew,
@@ -423,7 +428,8 @@ class BIRLTask(BaseTask):
             feet_py=foot_py_rew * balance_rew * 0.5,
             feet_frc=feet_contact_frc_rew * 0.001,
             joint_tor=joint_tor_rew  * 0.001,
-            pmf=pmf_rew * balance_rew * 0.03
+            pmf=pmf_rew * balance_rew * 0.03,
+            heading=heading_rew * 1.5,
         )
         if self.debug:
             self.rew_names = [name for name in rew_dict.keys()]
