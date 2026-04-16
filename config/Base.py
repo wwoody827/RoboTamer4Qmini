@@ -32,6 +32,8 @@ class Base:
         env_spacing = 3.  # not used with heightfields/trimeshes
         send_timeouts = True  # send time out information to the algorithm
         episode_length_s = 10  # episode length in seconds
+        use_mirror_augmentation = True   # augment each minibatch with mirrored L↔R samples (BIRL only; auto-disabled for MIRL)
+        mirror_weight = 0.5             # weight of mirror surrogate loss relative to main loss
 
     class policy(SetDict2Class):
         name = 'simple_policy'

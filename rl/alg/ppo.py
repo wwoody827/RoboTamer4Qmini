@@ -83,8 +83,13 @@ class PPO:
         last_values = self.critic(cri_obs).detach()
         self.storage.compute_returns(last_values, self.gamma, self.gae_lambda)
 
-    def update(self):
-        mean_surrogate_loss, mean_value_loss, mean_kl= 0., 0., 0.
+    def update(self, mirror=None, mirror_weight=0.5):
+        """
+        mirror: optional BIRLMirror instance. When provided, each mini-batch is
+        augmented with its L↔R mirrored counterpart to enforce policy symmetry.
+        Only the actor surrogate loss is computed for mirrored data (no value loss).
+        """
+        mean_surrogate_loss, mean_value_loss, mean_kl = 0., 0., 0.
         num_updates = self.num_learning_epochs * self.num_mini_batches
         generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
         for obs_batch, cri_obs_batch, actions_batch, target_values_batch, \
@@ -93,13 +98,11 @@ class PPO:
 
             res = self.actor(obs_batch)
             act, dist = res['act'], res['dist']
-            # dist = self.actor(obs_batch)['dist']
             logp_batch = dist.log_prob(actions_batch).sum(dim=-1)
             mu_batch = dist.mean
             sigma_batch = dist.stddev
             entropy_batch = dist.entropy().sum(dim=-1)
             value_batch = self.critic(cri_obs_batch)
-            # advantages_batch = advantages_batch / (advantages_batch.std() + 1e-5)
 
             # KL
             if self.desired_kl != None and self.schedule == 'adaptive':
@@ -118,11 +121,12 @@ class PPO:
                     for param_group in self.optimizer.param_groups:
                         param_group['lr'] = self.learning_rate
 
-            # Surrogate loss
+            # Surrogate loss (real data)
             ratio = (logp_batch - old_logp_batch.squeeze()).exp()
             surr1 = ratio * advantages_batch.squeeze()
             surr2 = torch.clamp(ratio, 1.0 - self.eps_clip, 1.0 + self.eps_clip) * advantages_batch.squeeze()
             surrogate_loss = -torch.min(surr1, surr2).mean()
+
             # Value function loss
             if self.use_clipped_value_loss:
                 value_clipped = target_values_batch + (value_batch - target_values_batch).clamp(-self.eps_clip,
@@ -133,8 +137,29 @@ class PPO:
             else:
                 value_loss = (returns_batch - value_batch).pow(2).mean()
 
-            # total loss
-            loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
+            # Mirror augmentation: surrogate loss on L↔R mirrored data
+            mirror_loss = torch.tensor(0.0, device=self.device)
+            if mirror is not None:
+                obs_m = mirror.mirror_obs(obs_batch)
+                act_m = mirror.mirror_actions(actions_batch)
+
+                res_m  = self.actor(obs_m)
+                logp_m = res_m['dist'].log_prob(act_m).sum(dim=-1)
+
+                # Use original old_logp as baseline (valid when policy is ~symmetric;
+                # avoids ratio explosion from recomputing on mirrored mu/sigma).
+                log_ratio_m = (logp_m - old_logp_batch.squeeze()).clamp(-5.0, 5.0)
+                ratio_m = log_ratio_m.exp()
+                adv_m   = advantages_batch.squeeze()
+                surr1_m = ratio_m * adv_m
+                surr2_m = torch.clamp(ratio_m, 1.0 - self.eps_clip, 1.0 + self.eps_clip) * adv_m
+                mirror_loss = -torch.min(surr1_m, surr2_m).mean()
+
+            # Total loss
+            loss = (surrogate_loss + mirror_weight * mirror_loss
+                    + self.value_loss_coef * value_loss
+                    - self.entropy_coef * entropy_batch.mean())
+
             # Gradient step
             self.optimizer.zero_grad()
             loss.backward()

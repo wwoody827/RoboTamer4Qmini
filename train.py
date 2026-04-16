@@ -14,6 +14,7 @@ from collections import deque
 import collections
 import statistics
 from utils.common import clear_dir
+from utils.mirror import BIRLMirror
 from utils.yaml import ParamsProcess
 from isaacgym.torch_utils import *
 from torch.utils.tensorboard import SummaryWriter
@@ -106,6 +107,14 @@ def train():
     alg = PPO(actor, critic, device=device, **class_to_dict(cfg.algorithm))
     alg.init_storage(cfg.runner.num_envs, num_steps_per_env, [len(gym_env.task.critic_observation()[0])],
                      [task.num_observations], [task.num_actions])
+
+    _use_mirror = getattr(cfg.runner, 'use_mirror_augmentation', False) and task.num_actions == 12
+    _mirror_weight = getattr(cfg.runner, 'mirror_weight', 0.5)
+    _mirror = BIRLMirror(obs_history=3, device=device) if _use_mirror else None
+    if _mirror is not None:
+        print(f'[mirror] L↔R symmetry augmentation enabled (weight={_mirror_weight})')
+    elif getattr(cfg.runner, 'use_mirror_augmentation', False):
+        print(f'[mirror] skipped — not a 12-dim BIRL action space')
     if args.resume is not None:
         resume_model_dir = join(join('experiments', args.resume), 'model')
         saved_model_state_dict = torch.load(join(resume_model_dir, 'policy.pt'))
@@ -133,6 +142,8 @@ def train():
         start = time.time()
         rew_component_acc = None
         rew_component_steps = 0
+        torque_acc = None
+        torque_steps = 0
         for i in range(num_steps_per_env):
             act = alg.act(obs, cri_obs)
             obs, cri_obs, rew, done, info, eval_rew = gym_env.step(act,it)
@@ -147,6 +158,13 @@ def train():
                 else:
                     rew_component_acc += step_mean
                 rew_component_steps += 1
+            if hasattr(gym_env.env, 'react_tau'):
+                tau_mean = gym_env.env.react_tau.abs().mean(dim=0).detach()  # [num_joints]
+                if torque_acc is None:
+                    torque_acc = tau_mean
+                else:
+                    torque_acc += tau_mean
+                torque_steps += 1
             reset_env_ids = (done > 0).nonzero(as_tuple=False)[:, [0]].flatten()
             if len(reset_env_ids) > 0:
                 rew_buffer.extend(cur_reward_sum[reset_env_ids].cpu().numpy().tolist())
@@ -159,7 +177,7 @@ def train():
         stop = time.time()
         collection_time = stop - start
         start = stop
-        mean_value_loss, mean_surrogate_loss, mean_kl = alg.update()
+        mean_value_loss, mean_surrogate_loss, mean_kl = alg.update(mirror=_mirror, mirror_weight=_mirror_weight)
         saved_model_state_dict = {
             'actor': alg.actor.state_dict(),
             'critic': alg.critic.state_dict(),
@@ -239,6 +257,13 @@ def train():
             rew_component_mean = rew_component_acc / rew_component_steps
             for name, val in zip(gym_env.task.rew_names, rew_component_mean.cpu().tolist()):
                 writer.add_scalar(f'4:Rewards/{name}', val, it)
+
+        if torque_acc is not None and torque_steps > 0:
+            torque_mean = (torque_acc / torque_steps).cpu().tolist()
+            joint_names = ['hip_yaw_l', 'hip_roll_l', 'hip_pitch_l', 'knee_l', 'ankle_l',
+                           'hip_yaw_r', 'hip_roll_r', 'hip_pitch_r', 'knee_r', 'ankle_r']
+            for name, val in zip(joint_names, torque_mean):
+                writer.add_scalar(f'6:Torque/{name}', val, it)
 
         print(f"{exp_name}#{it}:",
               f"{'t'} {total_time / 60:.1f}m({iteration_time:.1f}s)",

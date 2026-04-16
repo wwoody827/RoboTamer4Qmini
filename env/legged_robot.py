@@ -582,8 +582,7 @@ class LeggedRobotEnv:
 
             actor_handle = self.gym.create_actor(env_handle, robot_asset, start_pose, "robot", i,
                                                  self.cfg.asset.self_collisions)  # todo!!! i
-            if self.render:
-                self.gym.enable_actor_dof_force_sensors(env_handle, actor_handle)
+            self.gym.enable_actor_dof_force_sensors(env_handle, actor_handle)
             rigid_shape_props = self._process_rigid_shape_props(rigid_shape_props_asset, i)
             self.gym.set_asset_rigid_shape_properties(robot_asset, rigid_shape_props)
             dof_props = self._process_dof_props(dof_props_asset, i)
