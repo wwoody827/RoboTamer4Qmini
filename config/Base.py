@@ -15,6 +15,7 @@ class Base:
 
     class task(SetDict2Class):
         cfg = 'Base'
+        use_teacher_obs = False  # append base_lin_vel (3 dims) → 47-dim obs/step
 
     class viewer:
         pos = [0, 0, 0.6]  # [m]
@@ -127,7 +128,8 @@ class Base:
         num_commands = 4
         resampling_time = 5.  # time before command are changed[s]
         heading_command = False  # if true: compute ang vel command from heading error
-        use_heading_reward = False  # penalise cumulative yaw drift when cmd_yaw ≈ 0
+        use_heading_reward    = False  # penalise cumulative yaw drift when cmd_yaw ≈ 0
+        use_yaw_smooth_reward = False  # penalise sudden yaw rate changes (works with any cmd_yaw)
 
         lin_vel_x_range = [-0.3, 0.7]
         lin_vel_y_range = [-0.3, 0.3]

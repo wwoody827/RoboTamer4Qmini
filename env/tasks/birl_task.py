@@ -109,7 +109,8 @@ class BIRLTask(BaseTask):
         self.foot_swing_mask = torch.logical_not(self.foot_support_mask)
         self.pm_f = self.phase_modulator.frequency.clone()
 
-        self.heading_ref = torch.zeros(self.num_envs, 1, dtype=torch.float, device=self.device)
+        self.heading_ref    = torch.zeros(self.num_envs, 1, dtype=torch.float, device=self.device)
+        self.last_ang_vel_z = torch.zeros(self.num_envs, 1, dtype=torch.float, device=self.device)
 
         self.last_foot_frc = torch.zeros(self.num_envs, self.num_legs, dtype=torch.float, device=self.device,
                                          requires_grad=False)
@@ -170,7 +171,8 @@ class BIRLTask(BaseTask):
         self.foot_support_mask = torch.logical_and(foot_support_mask_1, foot_support_mask_2)
         self.foot_swing_mask = torch.logical_not(self.foot_support_mask)
         self.pm_f = self.phase_modulator.frequency.clone()
-        self.heading_ref[env_ids] = self.env.base_euler[env_ids, 2].unsqueeze(-1)
+        self.heading_ref[env_ids]    = self.env.base_euler[env_ids, 2].unsqueeze(-1)
+        self.last_ang_vel_z[env_ids] = self.env.base_ang_vel[env_ids, 2].unsqueeze(-1)
         self.joint_act_for_pd[env_ids] = self.current_joint_act[env_ids]
         if self._use_act_filter:
             _alpha_range = getattr(self.cfg.action, 'actuator_filter_alpha_range', [0.3, 0.7])
@@ -216,6 +218,7 @@ class BIRLTask(BaseTask):
                                                    self.cfg.domain_rand.delay_rate_ranges[1])
             self.delay_angle_steps = random.randint(self.cfg.domain_rand.delay_angle_ranges[0],
                                                     self.cfg.domain_rand.delay_angle_ranges[1])
+        self.last_ang_vel_z = self.base_ang_vel[:, [2]].clone()
         if self._use_act_delay and self.env.common_step_counter % 200 == 0:
             self._act_delay_steps = random.randint(*getattr(self.cfg.action, 'actuator_delay_range', [1, 3]))
 
@@ -261,7 +264,7 @@ class BIRLTask(BaseTask):
         return obs_buf
 
     def pure_observation(self):
-        self.obs_buf = torch.cat([
+        parts = [
             self.commands[:, [0,1,2]],
             self.base_euler[:, :2] * 1.,
             self.base_ang_vel * 0.5,
@@ -272,7 +275,10 @@ class BIRLTask(BaseTask):
             (self.pm_f * 0.3 - 1.) * self.static_flag,
             # (self.base_acc.clip(min=-20., max=20.)) * 0.05,
             # self.net_out_history[-1][:, self.num_legs:] / 15.,
-        ], dim=1).clip(min=-3., max=3.)
+        ]
+        if getattr(self.cfg.task, 'use_teacher_obs', False):
+            parts.append(self.base_lin_vel)  # [num_envs, 3] — privileged, not available on real robot
+        self.obs_buf = torch.cat(parts, dim=1).clip(min=-3., max=3.)
         return self.obs_buf
 
     def action(self, net_out):
@@ -428,6 +434,13 @@ class BIRLTask(BaseTask):
         foot_phase_rew += -torch.norm(lcos[:, [0]] + lcos[:, [1]], dim=1, keepdim=True) ** 2
         foot_phase_rew *= self.static_flag
 
+        if getattr(self.cfg.command, 'use_yaw_smooth_reward', False):
+            yaw_smooth_rew = -torch.abs(
+                self.base_ang_vel[:, [2]] - self.last_ang_vel_z
+            ) * self.static_flag
+        else:
+            yaw_smooth_rew = torch.zeros(self.num_envs, 1, device=self.device)
+
         if getattr(self.cfg.command, 'use_heading_reward', False):
             heading_err = wrap_to_pi(self.env.base_euler[:, [2]] - self.heading_ref)
             heading_rew = torch.exp(-3.0 * heading_err ** 2)
@@ -467,6 +480,7 @@ class BIRLTask(BaseTask):
             joint_tor=joint_tor_rew  * 0.001,
             pmf=pmf_rew * balance_rew * 0.03,
             heading=heading_rew * 0.3,
+            yaw_smooth=yaw_smooth_rew * 2.0,
         )
         if self.debug:
             self.rew_names = [name for name in rew_dict.keys()]

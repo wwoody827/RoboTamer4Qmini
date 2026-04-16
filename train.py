@@ -80,6 +80,8 @@ def train():
             task_cfg = getattr(cfg.task, 'cfg', 'BIRL')
             if task_cfg.startswith('MIRL') or task_cfg == 'MIRL':
                 sim2sim_config_path = 'deploy/sim2sim/configs/qmini_mirl.yaml'
+            elif getattr(cfg.task, 'use_teacher_obs', False):
+                sim2sim_config_path = 'deploy/sim2sim/configs/qmini_birl_teacher.yaml'
             else:
                 sim2sim_config_path = 'deploy/sim2sim/configs/qmini_birl.yaml'
         if os.path.exists(sim2sim_config_path):

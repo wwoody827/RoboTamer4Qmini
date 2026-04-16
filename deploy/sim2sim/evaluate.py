@@ -107,18 +107,22 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
         return quat, quat_rotate_inverse(quat, world_angvel)
 
     def get_obs():
-        """BIRL obs: 44-dim with phase modulator."""
+        """BIRL obs: 44-dim standard, 47-dim teacher (+ base_lin_vel)."""
         q  = data.qpos[QPOS_START:QPOS_START + NUM_JOINTS]
         dq = data.qvel[QVEL_START:QVEL_START + NUM_JOINTS]
         quat, base_ang_vel = _imu_state()
         base_euler   = quat_to_euler_xyz(quat)[:2]
         pm_phase_val = np.concatenate([np.sin(pm.phase), np.cos(pm.phase)]) * static_flag
         pm_f_val     = (pm.frequency * 0.3 - 1.0) * static_flag
-        obs = np.concatenate([
+        parts = [
             commands, base_euler, base_ang_vel * 0.5,
             q - ref_joint, dq * 0.1, current_joint_act - q,
             pm_phase_val, pm_f_val,
-        ]).astype(np.float32)
+        ]
+        if obs_dim == 47:
+            base_lin_vel = quat_rotate_inverse(quat, data.qvel[:3]).astype(np.float32)
+            parts.append(base_lin_vel)
+        obs = np.concatenate(parts).astype(np.float32)
         return np.clip(obs, -3.0, 3.0)
 
     def get_obs_mirl():

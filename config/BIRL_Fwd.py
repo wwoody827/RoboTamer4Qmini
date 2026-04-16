@@ -39,7 +39,7 @@ class BIRL_Fwd(Base):
         num_commands      = 3
         resampling_time   = 5.
         heading_command   = False
-        use_heading_reward = False
+        use_heading_reward = True
 
         # Forward/backward only — zero lateral and yaw
         lin_vel_x_range   = [-0.3, 0.7]
