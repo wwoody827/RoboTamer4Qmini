@@ -11,9 +11,9 @@ import torch
 from env import LeggedRobotEnv, GymEnvWrapper
 from env.tasks import load_task_cls
 from env.utils import get_args
-from env.utils.helpers import class_to_dict, set_seed, parse_sim_params
+from env.utils.helpers import set_seed, parse_sim_params
 from model import load_actor
-from utils.yaml import ParamsProcess
+from config.loader import load_config, CfgNode
 from env.utils.math import scale_transform
 import pandas as pd
 from collections import deque
@@ -57,10 +57,7 @@ def play(args):
             os.makedirs(pic_folder)
         if not os.path.exists(crop_folder):
             os.makedirs(crop_folder)
-    paramsProcess = ParamsProcess()
-    params = paramsProcess.read_param(join(model_dir, 'cfg.yaml'))
-    cfg = getattr(importlib.import_module('.'.join(['config', params['task']['cfg']])), params['task']['cfg'])
-    cfg = paramsProcess.dict2class(cfg, params)
+    cfg = load_config(join(model_dir, 'cfg.yaml'))
 
     # cfg.runner.num_envs = min(cfg.runner.num_envs, 1)
     cfg.runner.num_envs = args.num_envs if args.num_envs is not None else 1
@@ -82,7 +79,7 @@ def play(args):
     set_seed(seed=None)
     # set_seed(seed=3985)
 
-    sim_params = parse_sim_params(args, class_to_dict(cfg.sim))
+    sim_params = parse_sim_params(args, cfg.sim.to_dict())
     env = LeggedRobotEnv(cfg=cfg,
                          sim_params=sim_params,
                          physics_engine=args.physics_engine,
@@ -99,7 +96,7 @@ def play(args):
     task.num_observations = pure_obs_len * stack_obs_len
     task.num_actions = len(gym_env.task.action_low)
 
-    actor = load_actor(class_to_dict(cfg.policy), device).eval()
+    actor = load_actor(cfg.policy.to_dict(), device).eval()
     if args.iter is not None:
         saved_model_state_dict = torch.load(join(model_dir, f'all/policy_{args.iter}.pt'))
     else:

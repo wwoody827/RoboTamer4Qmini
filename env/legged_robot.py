@@ -12,7 +12,7 @@ from typing import Dict
 
 from isaacgym.torch_utils import *
 from isaacgym import gymtorch, gymapi, gymutil
-from config.Base import Base
+from config.loader import CfgNode
 from env.utils.math import quat_apply_yaw
 import random
 from scipy.spatial.transform import Rotation as R
@@ -25,7 +25,7 @@ from collections import OrderedDict
 
 
 class LeggedRobotEnv:
-    def __init__(self, cfg: Base, sim_params, physics_engine, sim_device, render, fix_cam, residual_cfg=None,
+    def __init__(self, cfg: CfgNode, sim_params, physics_engine, sim_device, render, fix_cam, residual_cfg=None,
                  tcn_name=None, debug=False, epochs=1):
         """ Parses the provided config file,
             calls create_sim() (which creates, simulation, terrain and environments),

@@ -1,0 +1,12 @@
+# BIRL — Bimanual Imitation RL (12-dim action: 2 freq + 10 joints)
+_base: base.yaml
+
+task:
+  cfg: BIRL
+
+action:
+  high_ranges: [3., 3., 1., 1., 1., 1., 1., 1., 1., 1., 1., 1.]
+  low_ranges:  [0.5, 0.5, -1., -1., -1., -1., -1., -1., -1., -1., -1., -1.]
+  use_increment: true
+  inc_high_ranges: [3.5, 3.5, 15., 15., 15., 15., 15., 15., 15., 15., 15., 15.]
+  inc_low_ranges:  [0.5, 0.5, -15., -15., -15., -15., -15., -15., -15., -15., -15., -15.]

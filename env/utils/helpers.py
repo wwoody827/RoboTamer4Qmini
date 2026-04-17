@@ -7,33 +7,6 @@ from isaacgym import gymutil
 import torch
 
 
-def class_to_dict(obj) -> dict:
-    if not hasattr(obj, "__dict__"):
-        return obj
-    result = {}
-    for key in dir(obj):
-        if key.startswith("_"):
-            continue
-        element = []
-        val = getattr(obj, key)
-        if isinstance(val, list):
-            for item in val:
-                element.append(class_to_dict(item))
-        else:
-            element = class_to_dict(val)
-        result[key] = element
-    return result
-
-
-def update_class_from_dict(obj, dict):
-    for key, val in dict.items():
-        attr = getattr(obj, key, None)
-        if isinstance(attr, type):
-            update_class_from_dict(attr, val)
-        else:
-            setattr(obj, key, val)
-    return
-
 
 def set_seed(seed):
     if seed is None:
@@ -71,18 +44,6 @@ def parse_sim_params(args, sim_cfg=None):
     return sim_params
 
 
-def update_cfg_from_args(cfg, args):
-    if args.num_envs is not None:
-        cfg.runner.num_envs = args.num_envs
-    if args.seed is not None:
-        cfg.seed = args.seed
-    # alg runner parameters
-    if args.max_iterations is not None:
-        cfg.runner.max_iterations = args.max_iterations
-    if args.name is not None:
-        cfg.runner.name = args.name
-    return cfg
-
 
 def get_args():
     custom_parameters = [
@@ -96,8 +57,8 @@ def get_args():
          "help": "Name of the experiment to run or load. Overrides config file if provided."},
         {"name": "--residuals", "type": str, "action": "store_true", "default": None,
          "help": "Name of the experiment to run or load. Overrides config file if provided."},
-        {"name": "--config", "type": str, "action": "store_true", "default": 'config.aliengo',
-         "help": "Config of the experiment to run or load. Overrides config file if provided."},
+        {"name": "--config", "type": str, "action": "store_true", "default": 'configs/birl_fwd.yaml',
+         "help": "Path to YAML config file."},
         {"name": "--resume", "type": str, "action": "store_true", "default": None,
          "help": "Resume training from a checkpoint"},
         {"name": "--render", "action": "store_true", "default": False, "help": "Force display off at all times"},

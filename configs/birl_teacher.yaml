@@ -1,0 +1,5 @@
+# BIRL Teacher — privileged obs (base_lin_vel → 47-dim/step × 3 = 141 total)
+_base: birl_fwd.yaml
+
+task:
+  use_teacher_obs: true

@@ -1,0 +1,19 @@
+# BIRL forward/backward expert — vx only, no vy, no yaw
+# Usage: python train.py --config configs/birl_fwd.yaml --name birl_fwd_v1
+
+_base: birl.yaml
+
+action:
+  use_actuator_delay: true
+  use_actuator_filter: true
+
+command:
+  num_commands: 3
+  heading_command: false
+  use_heading_reward: true
+  lin_vel_x_range: [-0.3, 0.7]
+  lin_vel_y_range: [0., 0.]
+  ang_vel_yaw_range: [0., 0.]
+
+reward:
+  heading: 0.3

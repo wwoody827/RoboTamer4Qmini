@@ -1,0 +1,10 @@
+# MIRL forward expert — vx only
+_base: mirl.yaml
+
+task:
+  ref_clip_paths: []
+
+command:
+  lin_vel_x_range: [-0.3, 0.7]
+  lin_vel_y_range: [0., 0.]
+  ang_vel_yaw_range: [0., 0.]

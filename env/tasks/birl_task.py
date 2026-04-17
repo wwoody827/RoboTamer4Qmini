@@ -3,7 +3,6 @@ import numpy as np
 from scipy.linalg import toeplitz
 from collections import OrderedDict
 from env.legged_robot import LeggedRobotEnv
-from env.utils.helpers import class_to_dict
 from env.utils.math import wrap_to_pi, smallest_signed_angle_between
 from env.utils.phase_modulator import PhaseModulator
 from env.tasks.null_task import NullTask, register
@@ -30,7 +29,7 @@ class BIRLTask(BaseTask):
         self.commands = torch.zeros(self.num_envs, self.cfg.command.num_commands, dtype=torch.float, device=self.device,
                                     requires_grad=False)  # x vel, y vel, yaw vel, heading
 
-        self.command_cfgs = class_to_dict(self.cfg.command)
+        self.command_cfgs = self.cfg.command.to_dict()
         self.resampling_interval = int(self.cfg.command.resampling_time / self.env.dt)
         self.static_flag = torch.where(torch.norm(self.commands[:, :3], dim=1, keepdim=True) < 0.15, False,
                                        True).float()

@@ -4,7 +4,7 @@ import tempfile
 from os.path import join
 
 from env.utils import get_args
-from env.utils.helpers import update_cfg_from_args, class_to_dict, set_seed, parse_sim_params
+from env.utils.helpers import set_seed, parse_sim_params
 from env import LeggedRobotEnv, GymEnvWrapper
 from env.tasks import load_task_cls
 from model import load_actor, load_critic
@@ -15,7 +15,7 @@ import collections
 import statistics
 from utils.common import clear_dir
 from utils.mirror import BIRLMirror
-from utils.yaml import ParamsProcess
+from config.loader import load_config, CfgNode, config_to_dict, save_config
 from isaacgym.torch_utils import *
 from torch.utils.tensorboard import SummaryWriter
 import torch
@@ -25,13 +25,26 @@ import yaml
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 
 
+def _cfg_section_to_dict(section):
+    """Convert a CfgNode config section to dict."""
+    return section.to_dict()
+
+
 def train():
     torch.cuda.empty_cache()
     args = get_args()
     device = args.rl_device
-    cfg = getattr(importlib.import_module('.'.join(['config', args.config])), args.config)
-    cfg = update_cfg_from_args(cfg, args)
-    cfg.runner.num_envs = args.num_envs if args.num_envs is not None else cfg.runner.num_envs
+
+    config_arg = args.config
+    cfg = load_config(config_arg)
+
+    # Apply CLI overrides
+    if args.num_envs is not None:
+        cfg.runner.num_envs = args.num_envs
+    if args.seed is not None:
+        cfg.runner.seed = args.seed
+    if args.max_iterations is not None:
+        cfg.runner.max_iterations = args.max_iterations
     # Prefix with datetime unless resuming (resume must use the original name as-is)
     if args.resume is None:
         exp_name = time.strftime('%Y%m%d_%H%M') + '_' + args.name
@@ -49,7 +62,7 @@ def train():
     num_learning_iterations = cfg.runner.max_iterations
     set_seed(seed=None)
 
-    sim_params = parse_sim_params(args, class_to_dict(cfg.sim))
+    sim_params = parse_sim_params(args, _cfg_section_to_dict(cfg.sim))
     env = LeggedRobotEnv(cfg=cfg,
                          sim_params=sim_params,
                          physics_engine=args.physics_engine,
@@ -61,15 +74,14 @@ def train():
     task.num_observations = len(gym_env.task.pure_observation()[0]) * gym_env.task.obs_history.maxlen
     task.num_actions = len(gym_env.task.action_low)
 
-    cfg_dict = collections.OrderedDict()
-    paramProcess = ParamsProcess()
-    cfg_dict.update(paramProcess.class2dict(cfg))
+    # Build cfg_dict for saving
+    cfg_dict = collections.OrderedDict(config_to_dict(cfg))
     cfg_dict['policy'].update({'num_observations': task.num_observations, 'num_actions': task.num_actions,
                                'num_critic_obs': len(gym_env.task.critic_observation()[0])})
     cfg_dict['action'].update({'action_limit_low': env.dof_pos_limits[:, 0].cpu().numpy(), 'action_limit_up': env.dof_pos_limits[:, 1].cpu().numpy()})
     cfg_dict['action'].update({'action_scale_low': cfg.action.low_ranges[2:], 'action_scale_up': cfg.action.high_ranges[2:]})
 
-    paramProcess.write_param(join(model_dir, "cfg.yaml"), cfg_dict)
+    save_config(CfgNode(cfg_dict), join(model_dir, "cfg.yaml"))
 
     # ── sim2sim eval setup ────────────────────────────────────────────────────
     sim2sim_cfg = None
@@ -104,7 +116,7 @@ def train():
     critic = load_critic(cfg_dict['policy'], device).train()
 
 
-    alg = PPO(actor, critic, device=device, **class_to_dict(cfg.algorithm))
+    alg = PPO(actor, critic, device=device, **_cfg_section_to_dict(cfg.algorithm))
     alg.init_storage(cfg.runner.num_envs, num_steps_per_env, [len(gym_env.task.critic_observation()[0])],
                      [task.num_observations], [task.num_actions])
 

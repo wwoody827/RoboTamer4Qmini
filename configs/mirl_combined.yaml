@@ -1,0 +1,16 @@
+# MIRL combined — full directional control with imitation loss
+_base: mirl.yaml
+
+task:
+  ref_clip_paths: []
+  # ref_clip_paths:
+  #   - data/reference_clips/walk_fwd.npz
+  #   - data/reference_clips/walk_strafe.npz
+  #   - data/reference_clips/walk_turn.npz
+  w_imit: 0.5
+  w_task: 0.5
+
+command:
+  lin_vel_x_range: [-0.3, 0.7]
+  lin_vel_y_range: [-0.3, 0.3]
+  ang_vel_yaw_range: [-1., 1.]

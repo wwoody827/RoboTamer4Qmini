@@ -2,11 +2,8 @@ import numpy as np
 from numpy.random import choice
 
 from isaacgym import terrain_utils
-from config.Base import Base
-
-
 class Terrain:
-    def __init__(self, cfg: Base.terrain, num_robots) -> None:
+    def __init__(self, cfg, num_robots) -> None:
 
         self.cfg = cfg
         self.num_robots = num_robots
