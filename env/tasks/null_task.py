@@ -15,8 +15,16 @@ def check(cls):
         f"Please register the task:'{cls.name}'"
 
 
+# Aliases: task names that map to another registered task class.
+# Used to keep backward compat when task classes are merged.
+_ALIASES = {
+    'MIRLTask': 'BIRLTask',
+}
+
+
 def load_task_cls(name):
     name += "Task"
+    name = _ALIASES.get(name, name)
     if name in TASKS:
         return TASKS[name]
     else:

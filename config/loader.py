@@ -173,7 +173,7 @@ def _apply_overrides(d: Dict, overrides: Dict[str, Any]) -> Dict:
 _KNOWN_SECTIONS = {
     'task', 'runner', 'policy', 'algorithm', 'action', 'pd_gains',
     'init_state', 'domain_rand', 'noise_values', 'command', 'terrain',
-    'sim', 'asset', 'viewer', 'reward',
+    'sim', 'asset', 'viewer', 'reward', 'observation', 'phase',
 }
 
 

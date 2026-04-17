@@ -3,7 +3,11 @@
 _base: base.yaml
 
 task:
-  cfg: MIRL
+  cfg: BIRL
+  foot_mask_mode: contact
+
+phase:
+  mode: none
 
 action:
   high_ranges: [3., 3., 1., 1., 1., 1., 1., 1., 1., 1., 1., 1.]
@@ -12,6 +16,18 @@ action:
   inc_high_ranges: [15., 15., 15., 15., 15., 15., 15., 15., 15., 15.]
   inc_low_ranges:  [-15., -15., -15., -15., -15., -15., -15., -15., -15., -15.]
 
+observation:
+  slots:
+    - commands_8
+    - base_euler
+    - base_ang_vel
+    - joint_pos_err
+    - joint_vel
+    - joint_tracking_err
+    - ref_joint_pos_err
+    - ref_joint_vel
+    - ref_phase_progress
+
 command:
   num_commands: 8
   resampling_time: 5.
@@ -19,3 +35,13 @@ command:
   lin_vel_x_range: [-0.3, 0.7]
   lin_vel_y_range: [-0.3, 0.3]
   ang_vel_yaw_range: [-1.0, 1.0]
+
+reward:
+  # MIRL has no phase modulator — disable phase-dependent rewards
+  pmf: 0.0
+  foot_phase: 0.0
+  heading: 0.0
+  yaw_smooth: 0.0
+  # MIRL-specific rewards
+  power: 0.1
+  air_time: 1.0

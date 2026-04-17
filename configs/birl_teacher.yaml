@@ -3,3 +3,15 @@ _base: birl_fwd.yaml
 
 task:
   use_teacher_obs: true
+
+observation:
+  slots:
+    - commands_3
+    - base_euler
+    - base_ang_vel
+    - joint_pos_err
+    - joint_vel
+    - joint_tracking_err
+    - phase_sin_cos
+    - phase_freq
+    - base_lin_vel

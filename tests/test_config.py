@@ -306,7 +306,8 @@ class TestRealConfigs:
 
     def test_mirl_fwd(self, configs_dir):
         cfg = self._load(configs_dir, 'mirl_fwd.yaml')
-        assert cfg.task.cfg == 'MIRL'
+        assert cfg.task.cfg == 'BIRL'
+        assert cfg.phase.mode == 'none'
         assert cfg.command.num_commands == 8
         assert cfg.command.lin_vel_y_range == [0., 0.]
         # 10-dim actions
@@ -314,7 +315,8 @@ class TestRealConfigs:
 
     def test_mirl_combined(self, configs_dir):
         cfg = self._load(configs_dir, 'mirl_combined.yaml')
-        assert cfg.task.cfg == 'MIRL'
+        assert cfg.task.cfg == 'BIRL'
+        assert cfg.phase.mode == 'none'
         assert cfg.command.lin_vel_x_range == [-0.3, 0.7]
         assert cfg.command.lin_vel_y_range == [-0.3, 0.3]
 

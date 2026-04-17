@@ -62,11 +62,12 @@ class TestManifestBuild:
 
     def test_mirl_manifest(self, mirl_params):
         m = build_manifest(mirl_params)
-        assert m['task_type'] == 'MIRL'
+        assert m['task_type'] == 'BIRL'
         assert m['obs_per_step'] == 64
         assert m['obs_total'] == 192
         assert m['action_dim'] == 10
         assert m['phase_modulator']['enabled'] == False
+        assert m['phase_modulator']['mode'] == 'none'
 
     def test_mirl_action_scaling_10dim(self, mirl_params):
         m = build_manifest(mirl_params)

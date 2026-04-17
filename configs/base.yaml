@@ -4,6 +4,31 @@
 task:
   cfg: Base
   use_teacher_obs: false
+  foot_mask_mode: phase       # 'phase' (from phase modulator) | 'contact' (from contact forces)
+  ref_clip_paths: []          # list of .npz paths for MIRL imitation; empty = pure RL
+  w_imit: 0.5                 # imitation reward weight (only when ref_clip_paths != [])
+  w_task: 0.5                 # task reward weight (only when ref_clip_paths != [])
+
+# Phase modulator mode.
+#   output: policy outputs leg frequencies, PM integrates (BIRL legacy, 12-dim action)
+#   input:  external clock from velocity command (BD_X style, 10-dim action) [Phase 3]
+#   none:   no phase signal (MIRL legacy, 10-dim action)
+phase:
+  mode: output
+
+# Observation slots — ordered list of named slots to concatenate per step.
+# Total obs = len(slots_per_step) × obs_history. See env/obs_builder.py for slot defs.
+observation:
+  history: 3
+  slots:
+    - commands_3
+    - base_euler
+    - base_ang_vel
+    - joint_pos_err
+    - joint_vel
+    - joint_tracking_err
+    - phase_sin_cos
+    - phase_freq
 
 viewer:
   pos: [0, 0, 0.6]
@@ -230,3 +255,6 @@ reward:
   pmf: 0.03
   heading: 0.0
   yaw_smooth: 0.0
+  # MIRL-specific (disabled by default for BIRL)
+  power: 0.0
+  air_time: 0.0

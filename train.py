@@ -107,13 +107,14 @@ def train():
     alg.init_storage(cfg.runner.num_envs, num_steps_per_env, [len(gym_env.task.critic_observation()[0])],
                      [task.num_observations], [task.num_actions])
 
-    _use_mirror = getattr(cfg.runner, 'use_mirror_augmentation', False) and task.num_actions == 12
+    _phase_mode = task._phase_mode if hasattr(task, '_phase_mode') else 'output'
+    _use_mirror = getattr(cfg.runner, 'use_mirror_augmentation', False) and _phase_mode == 'output'
     _mirror_weight = getattr(cfg.runner, 'mirror_weight', 0.5)
     _mirror = BIRLMirror(obs_history=3, device=device) if _use_mirror else None
     if _mirror is not None:
         print(f'[mirror] L↔R symmetry augmentation enabled (weight={_mirror_weight})')
     elif getattr(cfg.runner, 'use_mirror_augmentation', False):
-        print(f'[mirror] skipped — not a 12-dim BIRL action space')
+        print(f'[mirror] skipped — mirror not yet supported for phase.mode={_phase_mode}')
     if args.resume is not None:
         resume_model_dir = join(join('experiments', args.resume), 'model')
         saved_model_state_dict = torch.load(join(resume_model_dir, 'policy.pt'))
