@@ -230,7 +230,7 @@ These differences are intentional — if the policy works despite them, it is mo
 cd ~/code/RoboTamer4Qmini
 LD_LIBRARY_PATH=~/miniconda3/envs/qmini/lib \
 ~/miniconda3/envs/qmini/bin/python deploy/sim2sim/sim2sim.py \
-    [--config deploy/sim2sim/configs/qmini_birl.yaml] \
+    --policy experiments/<name>/deploy/policy_<iter>.onnx \
     [--cmd_vx 0.5] \
     [--cmd_vy 0.0] \
     [--cmd_yaw 0.0] \
@@ -238,11 +238,12 @@ LD_LIBRARY_PATH=~/miniconda3/envs/qmini/lib \
     [--headless]       # no viewer — prints x/y/z/roll/pitch/yaw/vx/vy to stdout
 ```
 
-To use a different trained model, export it first then point the config at it:
+The manifest (`policy_<iter>_manifest.yaml`) is auto-discovered next to the ONNX file.
+To export a model manually:
 
 ```bash
 python export_pt2onnx.py --name my_run
-# Edit policy_path in qmini_birl.yaml → experiments/my_run/deploy/policy.onnx
+# Creates policy.onnx + policy_manifest.yaml in experiments/my_run/deploy/
 ```
 
 ---
@@ -252,7 +253,7 @@ python export_pt2onnx.py --name my_run
 | File | Purpose |
 |---|---|
 | [sim2sim.py](sim2sim.py) | Main script |
-| [configs/qmini_birl.yaml](configs/qmini_birl.yaml) | Robot + policy config |
+| [../manifest.py](../manifest.py) | Shared manifest builder |
 | [../../assets/q1/urdf/q1.urdf](../../assets/q1/urdf/q1.urdf) | Robot URDF |
 | [../../env/tasks/birl_task.py](../../env/tasks/birl_task.py) | Observation/action reference |
 | [../../env/legged_robot.py](../../env/legged_robot.py) | Torque formula reference |

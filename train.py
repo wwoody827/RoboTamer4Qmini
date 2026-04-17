@@ -16,10 +16,10 @@ import statistics
 from utils.common import clear_dir
 from utils.mirror import BIRLMirror
 from config.loader import load_config, CfgNode, config_to_dict, save_config
+from deploy.manifest import build_manifest, save_manifest
 from isaacgym.torch_utils import *
 from torch.utils.tensorboard import SummaryWriter
 import torch
-import yaml
 
 # os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
@@ -87,29 +87,16 @@ def train():
     sim2sim_cfg = None
     sim2sim_interval = getattr(args, 'sim2sim_interval', 0)
     if sim2sim_interval > 0:
-        sim2sim_config_path = getattr(args, 'sim2sim_config', None)
-        if sim2sim_config_path is None:
-            # Auto-select sim2sim config based on task type
-            task_cfg = getattr(cfg.task, 'cfg', 'BIRL')
-            if task_cfg.startswith('MIRL') or task_cfg == 'MIRL':
-                sim2sim_config_path = 'deploy/sim2sim/configs/qmini_mirl.yaml'
-            elif getattr(cfg.task, 'use_teacher_obs', False):
-                sim2sim_config_path = 'deploy/sim2sim/configs/qmini_birl_teacher.yaml'
-            else:
-                sim2sim_config_path = 'deploy/sim2sim/configs/qmini_birl.yaml'
-        if os.path.exists(sim2sim_config_path):
-            with open(sim2sim_config_path, encoding='utf-8') as _f:
-                sim2sim_cfg = yaml.safe_load(_f)
-            # add sim2sim helpers to path
-            import sys as _sys
-            _sim2sim_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'deploy', 'sim2sim')
-            if _sim2sim_dir not in _sys.path:
-                _sys.path.insert(0, _sim2sim_dir)
-            from evaluate import quick_eval as _quick_eval
-            print(f'[sim2sim] eval enabled every {sim2sim_interval} iters using {sim2sim_config_path}')
-        else:
-            print(f'[sim2sim] config not found: {sim2sim_config_path} — sim2sim eval disabled')
-            sim2sim_interval = 0
+        import sys as _sys
+        _sim2sim_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'deploy', 'sim2sim')
+        if _sim2sim_dir not in _sys.path:
+            _sys.path.insert(0, _sim2sim_dir)
+        from sim2sim import manifest_to_sim2sim_cfg
+        from evaluate import quick_eval as _quick_eval
+        # Build manifest from training config — no separate YAML files needed
+        _manifest = build_manifest(cfg_dict)
+        sim2sim_cfg = manifest_to_sim2sim_cfg(_manifest, policy_path='<will be set per eval>')
+        print(f'[sim2sim] eval enabled every {sim2sim_interval} iters (manifest-based)')
     # ─────────────────────────────────────────────────────────────────────────
 
     actor = load_actor(cfg_dict['policy'], device).train()
@@ -222,6 +209,9 @@ def train():
                                   opset_version=12, input_names=['input'], output_names=['output'],
                                   verbose=False)
                 alg.actor.to(device).train()
+                # Save manifest alongside ONNX
+                save_manifest(_manifest, os.path.join(_deploy_dir, f'policy_{it}_manifest.yaml'))
+                sim2sim_cfg['policy_path'] = _onnx_path
                 _metrics = _quick_eval(_onnx_path, sim2sim_cfg)
                 for k, v in _metrics.items():
                     if not (isinstance(v, float) and (v != v)):  # skip nan

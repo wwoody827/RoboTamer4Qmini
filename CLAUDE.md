@@ -31,8 +31,7 @@ The robot has 10 actuated joints (5 per leg: hip_yaw, hip_roll, hip_pitch, knee,
 | `export_pt2onnx.py` | Export `.pt` checkpoint to `.onnx` |
 | `deploy/sim2sim/sim2sim.py` | Interactive MuJoCo sim2sim |
 | `deploy/sim2sim/evaluate.py` | Batch evaluation + CSV + TensorBoard |
-| `deploy/sim2sim/configs/qmini_birl.yaml` | BIRL sim2sim config |
-| `deploy/sim2sim/configs/qmini_mirl.yaml` | MIRL sim2sim config |
+| `deploy/manifest.py` | Shared manifest builder for export + sim2sim |
 
 ---
 
@@ -55,9 +54,9 @@ The robot has 10 actuated joints (5 per leg: hip_yaw, hip_roll, hip_pitch, knee,
     --max_iterations 10000
 ```
 
-train.py auto-selects sim2sim config: MIRL configs → `qmini_mirl.yaml`, BIRL → `qmini_birl.yaml`.
+Sim2sim config is built automatically from the training config via manifest (no separate YAML needed).
 Experiments saved to `experiments/<name>/`.
-ONNX exported automatically at each sim2sim eval → `experiments/<name>/deploy/policy_<iter>.onnx`.
+ONNX + manifest exported automatically at each sim2sim eval → `experiments/<name>/deploy/policy_<iter>.onnx` + `policy_<iter>_manifest.yaml`.
 
 TensorBoard: `tensorboard --logdir experiments/`
 
@@ -84,7 +83,6 @@ TensorBoard: `tensorboard --logdir experiments/`
 
 ```bash
 /home/woody/miniconda3/envs/qmini/bin/python deploy/sim2sim/evaluate.py \
-    --config deploy/sim2sim/configs/qmini_mirl.yaml \
     --policy experiments/<name>/deploy/policy_<iter>.onnx \
     --runs 10 --duration 10
 ```
@@ -111,12 +109,11 @@ Quick eval also runs automatically during training every `--sim2sim_interval` it
 | | BIRL | MIRL |
 |---|---|---|
 | Task class | `BIRLTask` | `MIRLTask` (extends BIRLTask) |
-| Config | `config/BIRL.py` | `config/MIRL_Fwd.py` etc. |
+| Config | `configs/birl_fwd.yaml` | `configs/mirl_fwd.yaml` etc. |
 | Obs dims | 44 per step × 3 = **132 total** | 64 per step × 3 = **192 total** |
 | Action dims | **12** (2 leg-freq + 10 joints) | **10** (joints only, no freq) |
 | Phase modulator | Yes — in obs + action | No — phase slots are zeros |
 | Command slots | 3 (vx, vy, yaw) | 8 (vx, vy, yaw, height, 0,0,0,0) |
-| Sim2sim config | `qmini_birl.yaml` | `qmini_mirl.yaml` |
 | Mode detection | `len(act_low) == 12` | `len(act_low) == 10` |
 
 ---

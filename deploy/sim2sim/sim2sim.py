@@ -5,7 +5,7 @@ Train in Isaac Gym → validate here → deploy to real robot.
 
 Usage:
     cd ~/code/RoboTamer4Qmini
-    python deploy/sim2sim/sim2sim.py [--config deploy/sim2sim/configs/qmini_birl.yaml]
+    python deploy/sim2sim/sim2sim.py --policy experiments/<name>/deploy/policy_<iter>.onnx
                                      [--cmd_vx 0.5] [--cmd_yaw 0.0]
                                      [--duration 30]
                                      [--interactive]   # keyboard / joystick control
@@ -30,6 +30,73 @@ try:
     _PYGAME_OK = True
 except ImportError:
     _PYGAME_OK = False
+
+# ---------------------------------------------------------------------------
+# Manifest loader — build sim2sim cfg from self-describing export manifest
+# ---------------------------------------------------------------------------
+
+# Torque correction terms (hardcoded in legged_robot.py — robot-specific constants)
+_JOINT_TOR_OFFSET = [0.6, 1.0, 0.0, 0.7, 0.0, -0.6, -1.0, 0.0, -0.7, 0.0]
+_JOINT_VEL_SIGN   = [0.0, 1.0, 0.0, 0.0, 0.0,  0.0,  1.0, 0.0,  0.0, 0.0]
+
+
+def load_manifest(policy_path):
+    """Auto-discover and load the manifest YAML next to an ONNX policy file.
+
+    Looks for:
+      1. <policy_name>_manifest.yaml  (e.g. policy_2000_manifest.yaml)
+      2. manifest.yaml                (generic fallback)
+
+    Returns (manifest_dict, manifest_path) or (None, None) if not found.
+    """
+    policy_dir = os.path.dirname(os.path.abspath(policy_path))
+    stem = os.path.splitext(os.path.basename(policy_path))[0]
+
+    candidates = [
+        os.path.join(policy_dir, f'{stem}_manifest.yaml'),
+        os.path.join(policy_dir, 'manifest.yaml'),
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            with open(p) as f:
+                return yaml.safe_load(f), p
+    return None, None
+
+
+def manifest_to_sim2sim_cfg(manifest, policy_path):
+    """Convert a deploy manifest dict into the flat cfg dict used by run() / run_episode().
+
+    This replaces the hand-maintained deploy/sim2sim/configs/*.yaml files.
+    """
+    act_low = manifest['action_scaling']['low']
+    act_high = manifest['action_scaling']['high']
+
+    cfg = {
+        'policy_path':        policy_path,
+        'urdf_path':          manifest.get('urdf_path', 'assets/q1/urdf/q1.urdf'),
+        'simulation_duration': 30.0,
+        'simulation_dt':      manifest.get('simulation_dt', 0.001),
+        'control_decimation': manifest['pd_gains']['decimation'],
+        'init_height':        manifest.get('init_height', 0.5),
+        'cmd_vx':             0.5,
+        'cmd_vy':             0.0,
+        'cmd_yaw':            0.0,
+        'ref_joint_pos':      manifest['ref_joint_pos'],
+        'kps':                manifest['pd_gains']['kps'],
+        'kds':                manifest['pd_gains']['kds'],
+        'joint_tor_offset':   _JOINT_TOR_OFFSET,
+        'joint_vel_sign':     _JOINT_VEL_SIGN,
+        'action_inc_low':     act_low,
+        'action_inc_high':    act_high,
+        'joint_limit_low':    manifest['joint_limits']['low'],
+        'joint_limit_high':   manifest['joint_limits']['high'],
+        'num_obs_per_step':   manifest['obs_per_step'],
+        'obs_history':        manifest['obs_history'],
+        'num_legs':           manifest['phase_modulator']['num_legs'],
+        'static_cmd_threshold': manifest['phase_modulator'].get('static_cmd_threshold', 0.15),
+    }
+    return cfg
+
 
 # ---------------------------------------------------------------------------
 # Phase modulator (mirrors env/utils/phase_modulator.py)
@@ -654,14 +721,15 @@ def _save_reference_clip(rec, path, dt, skill, loop):
 
 def main():
     parser = argparse.ArgumentParser(description='Sim2Sim validation in MuJoCo')
-    parser.add_argument('--config',   type=str,   default='deploy/sim2sim/configs/qmini_birl.yaml')
+    parser.add_argument('--config',   type=str,   default=None,
+                        help='Sim2sim config YAML (optional — auto-reads manifest from --policy if omitted)')
     parser.add_argument('--cmd_vx',   type=float, default=None, help='Forward velocity (m/s)')
     parser.add_argument('--cmd_vy',   type=float, default=None, help='Lateral velocity (m/s)')
     parser.add_argument('--cmd_yaw',  type=float, default=None, help='Yaw rate (rad/s)')
     parser.add_argument('--duration', type=float, default=None, help='Duration (s)')
     parser.add_argument('--headless',    action='store_true', help='Run without viewer, print state to stdout')
     parser.add_argument('--stand_only', action='store_true', help='No policy — hold ref joint positions (standing pose only)')
-    parser.add_argument('--policy',     type=str,   default=None, help='Path to .onnx policy (overrides config)')
+    parser.add_argument('--policy',     type=str,   default=None, help='Path to .onnx policy (auto-discovers manifest)')
     parser.add_argument('--floor_friction', type=float, default=None, help='Floor sliding friction (default 1.0, carpet ~3.0)')
     parser.add_argument('--floor_aniso', action='store_true', help='Anisotropic floor friction (carpet-like)')
     parser.add_argument('--interactive', action='store_true', help='Live keyboard/joystick command input')
@@ -671,11 +739,24 @@ def main():
     parser.add_argument('--record_skip',  type=int,   default=20,     help='Skip first N policy steps before recording (default: 20 ≈ 0.3s)')
     args = parser.parse_args()
 
-    with open(args.config) as f:
-        cfg = yaml.safe_load(f)
+    if args.config is not None:
+        # Explicit config file (legacy path — still supported)
+        with open(args.config) as f:
+            cfg = yaml.safe_load(f)
+        if args.policy is not None:
+            cfg['policy_path'] = args.policy
+    elif args.policy is not None:
+        # Auto-discover manifest from policy path
+        manifest, manifest_path = load_manifest(args.policy)
+        if manifest is not None:
+            print(f'[sim2sim] Using manifest: {manifest_path}')
+            cfg = manifest_to_sim2sim_cfg(manifest, args.policy)
+        else:
+            parser.error(f'No manifest found next to {args.policy}. '
+                         f'Either export with export_pt2onnx.py first, or pass --config explicitly.')
+    else:
+        parser.error('Provide --policy (auto-discovers manifest) or --config (legacy sim2sim YAML).')
 
-    if args.policy is not None:
-        cfg['policy_path'] = args.policy
     if args.floor_friction is not None:
         cfg['floor_friction'] = args.floor_friction
     if args.floor_aniso:

@@ -6,7 +6,7 @@ each condition repeated N times, outputs a CSV summary, and prints a
 breakdown report with optional matplotlib plots.
 
 Usage:
-    python deploy/sim2sim/evaluate.py [--config deploy/sim2sim/configs/qmini_birl.yaml]
+    python deploy/sim2sim/evaluate.py --policy experiments/<name>/deploy/policy_<iter>.onnx
                                       [--runs 10]
                                       [--duration 10]
                                       [--out experiments/my_run/eval.csv]
@@ -30,6 +30,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sim2sim import (
     build_mujoco_model, PhaseModulator,
     quat_to_euler_xyz, quat_rotate_inverse, scale_transform,
+    load_manifest, manifest_to_sim2sim_cfg,
 )
 
 import onnxruntime as ort
@@ -546,8 +547,9 @@ def quick_eval(onnx_path, sim_cfg,
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config',   default='deploy/sim2sim/configs/qmini_birl.yaml')
-    parser.add_argument('--policy',   default=None, help='Override policy_path in config (path to .onnx)')
+    parser.add_argument('--config',   default=None,
+                        help='Sim2sim config YAML (optional — auto-reads manifest from --policy if omitted)')
+    parser.add_argument('--policy',   default=None, help='Path to .onnx policy (auto-discovers manifest)')
     parser.add_argument('--runs',     type=int,   default=10,   help='Runs per condition')
     parser.add_argument('--duration', type=float, default=10.0, help='Seconds per episode')
     parser.add_argument('--out',      default=None, help='Output CSV path')
@@ -562,11 +564,23 @@ def main():
             make_plots(args.report_only)
         return
 
-    with open(args.config) as f:
-        cfg = yaml.safe_load(f)
-
-    if args.policy is not None:
-        cfg['policy_path'] = args.policy
+    if args.config is not None:
+        # Explicit config file (legacy path — still supported)
+        with open(args.config) as f:
+            cfg = yaml.safe_load(f)
+        if args.policy is not None:
+            cfg['policy_path'] = args.policy
+    elif args.policy is not None:
+        # Auto-discover manifest from policy path
+        manifest, manifest_path = load_manifest(args.policy)
+        if manifest is not None:
+            print(f'[evaluate] Using manifest: {manifest_path}')
+            cfg = manifest_to_sim2sim_cfg(manifest, args.policy)
+        else:
+            parser.error(f'No manifest found next to {args.policy}. '
+                         f'Either export with export_pt2onnx.py first, or pass --config explicitly.')
+    else:
+        parser.error('Provide --policy (auto-discovers manifest) or --config (legacy sim2sim YAML).')
 
     if args.out is None:
         policy_dir = os.path.dirname(cfg['policy_path'])
