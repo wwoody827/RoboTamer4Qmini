@@ -28,7 +28,7 @@ import yaml
 # reuse sim2sim helpers
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sim2sim import (
-    build_mujoco_model, PhaseModulator,
+    build_mujoco_model, PhaseModulator, ExternalPhaseClock,
     quat_to_euler_xyz, quat_rotate_inverse, scale_transform,
     load_manifest, manifest_to_sim2sim_cfg,
 )
@@ -60,14 +60,20 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
     kds        = np.array(cfg['kds'],              dtype=np.float32)
     tor_offset = np.array(cfg['joint_tor_offset'], dtype=np.float32)
     vel_sign   = np.array(cfg['joint_vel_sign'],   dtype=np.float32)
-    act_low    = np.array(cfg['action_inc_low'],   dtype=np.float32)
-    act_high   = np.array(cfg['action_inc_high'],  dtype=np.float32)
-    jlim_low   = np.array(cfg['joint_limit_low'],  dtype=np.float32)
-    jlim_high  = np.array(cfg['joint_limit_high'], dtype=np.float32)
+    _act_low_cfg  = cfg['action_inc_low']
+    _act_high_cfg = cfg['action_inc_high']
+    jlim_low_cfg  = cfg['joint_limit_low']
+    jlim_high_cfg = cfg['joint_limit_high']
     num_legs   = cfg['num_legs']
     obs_hist   = cfg['obs_history']
     obs_dim    = cfg['num_obs_per_step']
     static_thr = cfg['static_cmd_threshold']
+
+    phase_mode  = cfg.get('phase_mode', 'output')
+    action_mode = cfg.get('action_mode', 'increment')
+    lp_alpha    = cfg.get('action_lowpass_alpha', 1.0)
+    is_mirl     = (phase_mode == 'none')
+    is_bdx      = (phase_mode == 'input')
 
     commands    = np.array([cmd_vx, cmd_vy, cmd_yaw], dtype=np.float32)
     static_flag = float(np.linalg.norm(commands) >= static_thr)
@@ -84,15 +90,40 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
     QVEL_START = 6
     imu_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, 'imu_in_torso')
 
+    # Resolve action scaling — absolute mode falls back to URDF joint limits
+    if _act_low_cfg is not None:
+        act_low  = np.array(_act_low_cfg, dtype=np.float32)
+        act_high = np.array(_act_high_cfg, dtype=np.float32)
+    elif action_mode == 'absolute':
+        jnt_start = 1  # skip root free joint
+        act_low  = np.array([model.jnt_range[jnt_start + i, 0] for i in range(NUM_JOINTS)], dtype=np.float32)
+        act_high = np.array([model.jnt_range[jnt_start + i, 1] for i in range(NUM_JOINTS)], dtype=np.float32)
+    else:
+        raise ValueError("action_mode='increment' requires action scaling ranges in manifest")
+
+    if jlim_low_cfg is not None:
+        jlim_low  = np.array(jlim_low_cfg, dtype=np.float32)
+        jlim_high = np.array(jlim_high_cfg, dtype=np.float32)
+    else:
+        jnt_start = 1
+        jlim_low  = np.array([model.jnt_range[jnt_start + i, 0] for i in range(NUM_JOINTS)], dtype=np.float32)
+        jlim_high = np.array([model.jnt_range[jnt_start + i, 1] for i in range(NUM_JOINTS)], dtype=np.float32)
+
     mujoco.mj_resetData(model, data)
     data.qpos[QPOS_START:QPOS_START + NUM_JOINTS] = ref_joint
     mujoco.mj_forward(model, data)
 
-    # Auto-detect mode: MIRL = 10-dim action (no freq outputs), BIRL = 12-dim
-    is_mirl = (len(act_low) == 10)
-
     pm = PhaseModulator(dt=policy_dt, num_legs=num_legs)
     pm.reset()
+    ext_clock = None
+    if is_bdx:
+        ext_clock = ExternalPhaseClock(
+            dt=policy_dt, num_legs=num_legs,
+            base_freq=cfg.get('phase_base_freq', 1.0),
+            vel_scale=cfg.get('phase_vel_scale', 1.0),
+        )
+        ext_clock.reset()
+    lp_target = ref_joint.copy()
     current_joint_act = ref_joint.copy()
     obs_history = deque(maxlen=obs_hist)
     for _ in range(obs_hist):
@@ -145,6 +176,24 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
         ]).astype(np.float32)
         return np.clip(obs, -3.0, 3.0)
 
+    def get_obs_bdx():
+        """BD_X obs: 42-dim with external phase clock."""
+        q  = data.qpos[QPOS_START:QPOS_START + NUM_JOINTS]
+        dq = data.qvel[QVEL_START:QVEL_START + NUM_JOINTS]
+        quat, base_ang_vel = _imu_state()
+        base_euler    = quat_to_euler_xyz(quat)[:2]
+        phase_clock   = ext_clock.sin_cos() * static_flag
+        obs = np.concatenate([
+            commands,            # 3
+            base_euler,          # 2
+            base_ang_vel * 0.5,  # 3
+            q - ref_joint,       # 10
+            dq * 0.1,            # 10
+            current_joint_act - q,  # 10
+            phase_clock,         # 4
+        ]).astype(np.float32)
+        return np.clip(obs, -3.0, 3.0)
+
     def compute_torques(target_q, q, dq):
         error = target_q - q
         return kps * error + kds - dq + tor_offset - 3.5 * np.sign(dq) * vel_sign
@@ -163,16 +212,33 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
 
     for step in range(total_steps):
         if step % decimation == 0:
-            obs_now = get_obs_mirl() if is_mirl else get_obs()
+            if is_bdx:
+                cmd_vel_norm = np.linalg.norm(commands[:2])
+                ext_clock.update(cmd_vel_norm)
+                obs_now = get_obs_bdx()
+            elif is_mirl:
+                obs_now = get_obs_mirl()
+            else:
+                obs_now = get_obs()
             obs_history.append(obs_now)
             obs_stacked = np.concatenate(list(obs_history))[np.newaxis, :]
             net_out = session.run(None, {input_name: obs_stacked})[0][0]
             scaled  = scale_transform(net_out, act_low, act_high)
-            if is_mirl:
-                current_joint_act[:] += scaled * policy_dt
-            else:
+
+            if phase_mode == 'output':
                 pm.compute(scaled[:num_legs])
-                current_joint_act[:] += scaled[num_legs:] * policy_dt
+                joint_out = scaled[num_legs:]
+            else:
+                joint_out = scaled
+
+            if action_mode == 'increment':
+                current_joint_act[:] += joint_out * policy_dt
+            else:
+                if lp_alpha < 1.0:
+                    lp_target[:] = lp_alpha * joint_out + (1.0 - lp_alpha) * lp_target
+                else:
+                    lp_target[:] = joint_out
+                current_joint_act[:] = lp_target
             current_joint_act[:] = np.clip(current_joint_act, jlim_low, jlim_high)
             static_flag = float(np.linalg.norm(commands) >= static_thr)
 
