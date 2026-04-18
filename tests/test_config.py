@@ -346,9 +346,24 @@ class TestRealConfigs:
         # Original not affected
         assert cfg.runner.num_envs == 4096
 
+    def test_bdx_config(self, configs_dir):
+        cfg = self._load(configs_dir, 'bdx.yaml')
+        assert cfg.task.cfg == 'BIRL'
+        assert cfg.task.foot_mask_mode == 'contact'
+        assert cfg.phase.mode == 'input'
+        assert cfg.phase.base_freq == 1.0
+        assert cfg.phase.vel_scale == 1.0
+        assert cfg.action.action_mode == 'absolute'
+        assert cfg.action.action_lowpass_alpha == 0.75
+        # abs_*_ranges null = use URDF limits at runtime
+        assert cfg.action.abs_high_ranges is None
+        assert cfg.action.abs_low_ranges is None
+        assert 'phase_clock' in cfg.observation.slots
+        assert 'phase_sin_cos' not in cfg.observation.slots
+
     def test_all_configs_have_reward_section(self, configs_dir):
         """Every config should inherit the reward section from base."""
-        for name in ['birl.yaml', 'birl_fwd.yaml', 'mirl.yaml', 'mirl_fwd.yaml']:
+        for name in ['birl.yaml', 'birl_fwd.yaml', 'mirl.yaml', 'mirl_fwd.yaml', 'bdx.yaml']:
             cfg = self._load(configs_dir, name)
             assert cfg.reward is not None, f"{name} missing reward section"
             assert cfg.reward.fwd_vel is not None, f"{name} missing reward.fwd_vel"

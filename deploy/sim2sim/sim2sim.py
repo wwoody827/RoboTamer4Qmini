@@ -68,8 +68,17 @@ def manifest_to_sim2sim_cfg(manifest, policy_path):
 
     This replaces the hand-maintained deploy/sim2sim/configs/*.yaml files.
     """
-    act_low = manifest['action_scaling']['low']
-    act_high = manifest['action_scaling']['high']
+    action_mode = manifest.get('action_mode', 'increment')
+    scaling = manifest['action_scaling']
+    # v3 manifest: separate inc_* and abs_* ranges; v2 compat: 'low'/'high' keys
+    if action_mode == 'absolute':
+        act_low = scaling.get('abs_low') or scaling.get('low') or scaling.get('inc_low')
+        act_high = scaling.get('abs_high') or scaling.get('high') or scaling.get('inc_high')
+    else:
+        act_low = scaling.get('inc_low') or scaling.get('low')
+        act_high = scaling.get('inc_high') or scaling.get('high')
+
+    phase_mode = manifest['phase_modulator'].get('mode', 'output')
 
     cfg = {
         'policy_path':        policy_path,
@@ -94,6 +103,12 @@ def manifest_to_sim2sim_cfg(manifest, policy_path):
         'obs_history':        manifest['obs_history'],
         'num_legs':           manifest['phase_modulator']['num_legs'],
         'static_cmd_threshold': manifest['phase_modulator'].get('static_cmd_threshold', 0.15),
+        # v3 manifest fields (defaults for v2 backward compat)
+        'action_mode':        manifest.get('action_mode', 'increment'),
+        'action_lowpass_alpha': manifest.get('action_lowpass_alpha', 1.0),
+        'phase_mode':         phase_mode,
+        'phase_base_freq':    manifest['phase_modulator'].get('base_freq', 1.0),
+        'phase_vel_scale':    manifest['phase_modulator'].get('vel_scale', 1.0),
     }
     return cfg
 
@@ -117,6 +132,35 @@ class PhaseModulator:
         self.frequency = np.array(frequency, dtype=np.float32)
         self.phase = (self.phase + tau * self.frequency * self.dt) % tau
         return self.phase
+
+
+class ExternalPhaseClock:
+    """Numpy mirror of env/utils/phase_modulator.ExternalPhaseClock (BD_X style)."""
+
+    def __init__(self, dt, num_legs=2, base_freq=1.0, vel_scale=1.0):
+        self.dt = dt
+        self.num_legs = num_legs
+        self.base_freq = base_freq
+        self.vel_scale = vel_scale
+        self.phase = np.zeros(num_legs, dtype=np.float32)
+        self.frequency = np.ones(num_legs, dtype=np.float32) * base_freq
+        self._leg_offset = np.zeros(num_legs, dtype=np.float32)
+        self._leg_offset[1] = np.pi  # anti-phase
+
+    def reset(self):
+        self.phase[:] = 0.0
+        self.frequency[:] = self.base_freq
+
+    def update(self, cmd_vel_norm):
+        """Advance phase: freq = base_freq + vel_scale * ||cmd_vel||."""
+        freq = self.base_freq + self.vel_scale * cmd_vel_norm
+        self.frequency[:] = freq
+        self.phase = (self.phase + tau * freq * self.dt) % tau
+
+    def sin_cos(self):
+        """Return [sin(L), sin(R), cos(L), cos(R)] — 4-dim."""
+        p = (self.phase + self._leg_offset) % tau
+        return np.concatenate([np.sin(p), np.cos(p)]).astype(np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -418,21 +462,27 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, duration=None, headless=Fal
     kds         = np.array(cfg['kds'],               dtype=np.float32)
     tor_offset  = np.array(cfg['joint_tor_offset'],  dtype=np.float32)
     vel_sign    = np.array(cfg['joint_vel_sign'],    dtype=np.float32)
-    act_low     = np.array(cfg['action_inc_low'],    dtype=np.float32)
-    act_high    = np.array(cfg['action_inc_high'],   dtype=np.float32)
-    jlim_low    = np.array(cfg['joint_limit_low'],   dtype=np.float32)
-    jlim_high   = np.array(cfg['joint_limit_high'],  dtype=np.float32)
+    # act_low/act_high resolved after model load (absolute mode may need URDF limits)
+    _act_low_cfg  = cfg['action_inc_low']
+    _act_high_cfg = cfg['action_inc_high']
+    jlim_low    = cfg['joint_limit_low']
+    jlim_high   = cfg['joint_limit_high']
     num_legs    = cfg['num_legs']
     obs_hist    = cfg['obs_history']
     obs_dim     = cfg['num_obs_per_step']
     static_thr  = cfg['static_cmd_threshold']
 
-    # Detect task mode from action dimension:
-    #   BIRL: 12-dim (2 leg-freq + 10 joints)
-    #   MIRL: 10-dim (all joints, no freq outputs)
-    is_mirl = (len(act_low) == 10)
+    # Mode detection from manifest (explicit config, not dimension inference)
+    phase_mode  = cfg.get('phase_mode', 'output')
+    action_mode = cfg.get('action_mode', 'increment')
+    lp_alpha    = cfg.get('action_lowpass_alpha', 1.0)
+    is_mirl     = (phase_mode == 'none')
+    is_bdx      = (phase_mode == 'input')
+    print(f"[sim2sim] phase.mode={phase_mode}, action_mode={action_mode}, lowpass_alpha={lp_alpha}")
     if is_mirl:
-        print("[sim2sim] Detected MIRL mode (10-dim action, 64-dim obs, no phase modulator)")
+        print("[sim2sim] MIRL mode (10-dim action, 64-dim obs, no phase modulator)")
+    elif is_bdx:
+        print("[sim2sim] BD_X mode (10-dim action, external phase clock, absolute targets)")
 
     # Interactive mode: always start from zero (joystick/keyboard is authoritative)
     cin = CommandInput(0.0, 0.0, 0.0) if (interactive and not headless) else None
@@ -465,10 +515,33 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, duration=None, headless=Fal
     joint_names = [model.joint(i).name for i in range(model.njnt)]
     print(f"MuJoCo joints: {joint_names}")
 
+    NUM_JOINTS = 10
+
+    # Resolve action scaling — absolute mode falls back to URDF joint limits
+    if _act_low_cfg is not None:
+        act_low  = np.array(_act_low_cfg, dtype=np.float32)
+        act_high = np.array(_act_high_cfg, dtype=np.float32)
+    elif action_mode == 'absolute':
+        # Read joint limits from MuJoCo model (skip free joint if present)
+        jnt_start = 1 if not stand_only else 0  # skip root free joint
+        act_low  = np.array([model.jnt_range[jnt_start + i, 0] for i in range(NUM_JOINTS)], dtype=np.float32)
+        act_high = np.array([model.jnt_range[jnt_start + i, 1] for i in range(NUM_JOINTS)], dtype=np.float32)
+        print(f"[sim2sim] Absolute mode: using URDF joint limits as action range")
+    else:
+        raise ValueError("action_mode='increment' requires action scaling ranges in manifest")
+
+    # Resolve joint limits for clipping (from manifest or model)
+    if jlim_low is not None:
+        jlim_low  = np.array(jlim_low, dtype=np.float32)
+        jlim_high = np.array(jlim_high, dtype=np.float32)
+    else:
+        jnt_start = 1 if not stand_only else 0
+        jlim_low  = np.array([model.jnt_range[jnt_start + i, 0] for i in range(NUM_JOINTS)], dtype=np.float32)
+        jlim_high = np.array([model.jnt_range[jnt_start + i, 1] for i in range(NUM_JOINTS)], dtype=np.float32)
+
     # qpos/qvel layout depends on whether base is free or fixed
     # free:  qpos = [7 (pos+quat)] + [10 joints],  qvel = [6 (lin+ang)] + [10]
     # fixed: qpos = [10 joints],                   qvel = [10]
-    NUM_JOINTS = 10
     QPOS_START = 0 if stand_only else 7
     QVEL_START = 0 if stand_only else 6
 
@@ -484,6 +557,15 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, duration=None, headless=Fal
     # Policy state
     pm = PhaseModulator(dt=policy_dt, num_legs=num_legs)
     pm.reset()
+    ext_clock = None
+    if is_bdx:
+        ext_clock = ExternalPhaseClock(
+            dt=policy_dt, num_legs=num_legs,
+            base_freq=cfg.get('phase_base_freq', 1.0),
+            vel_scale=cfg.get('phase_vel_scale', 1.0),
+        )
+        ext_clock.reset()
+    lp_target = ref_joint.copy()  # lowpass state for absolute mode
 
     current_joint_act = ref_joint.copy()
     obs_history = deque(maxlen=obs_hist)
@@ -572,6 +654,39 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, duration=None, headless=Fal
         obs = np.clip(obs, -3.0, 3.0)
         return obs
 
+    def get_obs_bdx():
+        """Build BD_X-style observation vector (phase.mode=input, 42-dim).
+
+        Layout matches bdx.yaml obs_slots:
+          [0-2]   commands_3: vx, vy, yaw
+          [3-4]   base_euler: roll, pitch
+          [5-7]   base_ang_vel × 0.5
+          [8-17]  joint_pos − ref_joint_pos
+          [18-27] joint_vel × 0.1
+          [28-37] joint_act − joint_pos (tracking error)
+          [38-41] phase_clock: sin/cos of external phase × static_flag
+        """
+        q  = data.qpos[QPOS_START:QPOS_START + NUM_JOINTS]
+        dq = data.qvel[QVEL_START:QVEL_START + NUM_JOINTS]
+        quat, base_ang_vel = _get_imu_state()
+        euler         = quat_to_euler_xyz(quat)
+        base_euler    = euler[:2]
+        joint_pos_rel = q - ref_joint
+        joint_vel_sc  = dq * 0.1
+        joint_pos_err = current_joint_act - q
+        phase_clock   = ext_clock.sin_cos() * static_flag
+        obs = np.concatenate([
+            commands,            # 3
+            base_euler,          # 2
+            base_ang_vel * 0.5,  # 3
+            joint_pos_rel,       # 10
+            joint_vel_sc,        # 10
+            joint_pos_err,       # 10
+            phase_clock,         # 4
+        ]).astype(np.float32)
+        obs = np.clip(obs, -3.0, 3.0)
+        return obs
+
     def compute_torques(target_q, q, dq):
         """
         Matches legged_robot.py line 414:
@@ -608,26 +723,48 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, duration=None, headless=Fal
                 mujoco.mj_resetData(model, data)
                 data.qpos[QPOS_START:QPOS_START + NUM_JOINTS] = ref_joint
                 current_joint_act[:] = ref_joint.copy()
+                lp_target[:] = ref_joint.copy()
                 pm.reset()
+                if ext_clock is not None:
+                    ext_clock.reset()
                 mujoco.mj_forward(model, data)
             vx, vy, yaw = cin.get()
             commands[0] = vx; commands[1] = vy; commands[2] = yaw
 
         if step % decimation == 0:
             if not stand_only:
-                obs_now = get_obs_mirl() if is_mirl else get_obs()
+                # Select obs function based on phase mode
+                if is_bdx:
+                    cmd_vel_norm = np.linalg.norm(commands[:2])
+                    ext_clock.update(cmd_vel_norm)
+                    obs_now = get_obs_bdx()
+                elif is_mirl:
+                    obs_now = get_obs_mirl()
+                else:
+                    obs_now = get_obs()
                 obs_history.append(obs_now)
                 obs_stacked = np.concatenate(list(obs_history))[np.newaxis, :]
 
                 net_out = session.run(None, {input_name: obs_stacked})[0][0]
                 scaled = scale_transform(net_out, act_low, act_high)
-                if is_mirl:
-                    # All 10 outputs are joint position increments
-                    current_joint_act[:] += scaled * policy_dt
-                else:
-                    # BIRL: first num_legs outputs drive phase, rest are joint increments
+
+                if phase_mode == 'output':
+                    # BIRL: first num_legs outputs drive phase, rest are joints
                     pm.compute(scaled[:num_legs])
-                    current_joint_act[:] += scaled[num_legs:] * policy_dt
+                    joint_out = scaled[num_legs:]
+                else:
+                    # MIRL / BD_X: all outputs are joint targets
+                    joint_out = scaled
+
+                if action_mode == 'increment':
+                    current_joint_act[:] += joint_out * policy_dt
+                else:
+                    # Absolute mode with optional lowpass
+                    if lp_alpha < 1.0:
+                        lp_target[:] = lp_alpha * joint_out + (1.0 - lp_alpha) * lp_target
+                    else:
+                        lp_target[:] = joint_out
+                    current_joint_act[:] = lp_target
                 current_joint_act[:] = np.clip(current_joint_act, jlim_low, jlim_high)
             static_flag = float(np.linalg.norm(commands) >= static_thr)
 

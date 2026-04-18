@@ -33,7 +33,7 @@ class TestManifestBuild:
 
     def test_birl_manifest_required_fields(self, birl_params):
         m = build_manifest(birl_params)
-        assert m['format_version'] == 2
+        assert m['format_version'] == 3
         assert m['task_type'] == 'BIRL'
         assert m['obs_per_step'] == 44
         assert m['obs_history'] == 3
@@ -43,8 +43,8 @@ class TestManifestBuild:
 
     def test_birl_action_scaling(self, birl_params):
         m = build_manifest(birl_params)
-        assert len(m['action_scaling']['low']) == 12
-        assert len(m['action_scaling']['high']) == 12
+        assert len(m['action_scaling']['inc_low']) == 12
+        assert len(m['action_scaling']['inc_high']) == 12
 
     def test_birl_phase_modulator_enabled(self, birl_params):
         m = build_manifest(birl_params)
@@ -71,8 +71,8 @@ class TestManifestBuild:
 
     def test_mirl_action_scaling_10dim(self, mirl_params):
         m = build_manifest(mirl_params)
-        assert len(m['action_scaling']['low']) == 10
-        assert len(m['action_scaling']['high']) == 10
+        assert len(m['action_scaling']['inc_low']) == 10
+        assert len(m['action_scaling']['inc_high']) == 10
 
     def test_teacher_manifest(self):
         cfg = load_config(os.path.join(os.path.dirname(__file__), '..', 'configs', 'birl_teacher.yaml'))
@@ -107,6 +107,23 @@ class TestManifestBuild:
         m = build_manifest(d)
         assert len(m['joint_limits']['low']) == 10
         assert len(m['joint_limits']['high']) == 10
+
+
+    def test_bdx_manifest(self):
+        cfg = load_config(os.path.join(os.path.dirname(__file__), '..', 'configs', 'bdx.yaml'))
+        d = config_to_dict(cfg)
+        d['policy']['num_observations'] = 126  # 42 * 3
+        d['policy']['num_actions'] = 10
+        m = build_manifest(d)
+        assert m['task_type'] == 'BIRL'
+        assert m['obs_per_step'] == 42
+        assert m['action_dim'] == 10
+        assert m['action_mode'] == 'absolute'
+        assert m['action_lowpass_alpha'] == 0.75
+        assert m['phase_modulator']['enabled'] == False
+        assert m['phase_modulator']['mode'] == 'input'
+        assert m['phase_modulator']['base_freq'] == 1.0
+        assert m['phase_modulator']['vel_scale'] == 1.0
 
 
 class TestManifestConsistencyWithConfig:
@@ -190,8 +207,8 @@ class TestManifestToSim2simCfg:
 
     def test_action_scaling_length_matches_manifest(self, birl_manifest):
         cfg = self._convert(birl_manifest)
-        assert len(cfg['action_inc_low']) == len(birl_manifest['action_scaling']['low'])
-        assert len(cfg['action_inc_high']) == len(birl_manifest['action_scaling']['high'])
+        assert len(cfg['action_inc_low']) == len(birl_manifest['action_scaling']['inc_low'])
+        assert len(cfg['action_inc_high']) == len(birl_manifest['action_scaling']['inc_high'])
 
     def test_policy_path_propagated(self, birl_manifest):
         cfg = self._convert(birl_manifest, '/some/path/policy.onnx')
@@ -200,3 +217,22 @@ class TestManifestToSim2simCfg:
     def test_decimation_matches(self, birl_manifest):
         cfg = self._convert(birl_manifest)
         assert cfg['control_decimation'] == birl_manifest['pd_gains']['decimation']
+
+    def test_v3_fields_propagated(self, birl_manifest):
+        cfg = self._convert(birl_manifest)
+        assert cfg['action_mode'] == 'increment'
+        assert cfg['action_lowpass_alpha'] == 1.0
+        assert cfg['phase_mode'] == 'output'
+
+    def test_bdx_sim2sim_cfg(self):
+        bdx_cfg = load_config(os.path.join(os.path.dirname(__file__), '..', 'configs', 'bdx.yaml'))
+        d = config_to_dict(bdx_cfg)
+        d['policy']['num_observations'] = 126
+        d['policy']['num_actions'] = 10
+        m = build_manifest(d)
+        cfg = self._convert(m)
+        assert cfg['action_mode'] == 'absolute'
+        assert cfg['action_lowpass_alpha'] == 0.75
+        assert cfg['phase_mode'] == 'input'
+        assert cfg['phase_base_freq'] == 1.0
+        assert cfg['phase_vel_scale'] == 1.0

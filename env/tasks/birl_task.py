@@ -4,7 +4,7 @@ from scipy.linalg import toeplitz
 from collections import OrderedDict
 from env.legged_robot import LeggedRobotEnv
 from env.utils.math import wrap_to_pi, smallest_signed_angle_between
-from env.utils.phase_modulator import PhaseModulator
+from env.utils.phase_modulator import PhaseModulator, ExternalPhaseClock
 from env.tasks.null_task import NullTask, register
 from isaacgym.torch_utils import *  # includes to_torch, torch_rand_float
 from scipy.spatial.transform import Rotation as R
@@ -25,6 +25,8 @@ class BIRLTask(BaseTask):
     _has_ref = False
     _phase_mode = 'output'
     _foot_mask_mode = 'phase'
+    _action_mode = 'increment'
+    _ext_clock = None
 
     def __init__(self, env: LeggedRobotEnv):
         self.obs_builder = None  # set before super().__init__ which calls pure_observation()
@@ -78,15 +80,53 @@ class BIRLTask(BaseTask):
         self.foot_phase = self.phase_modulator.phase
         self.pm_phase = torch.cat((torch.sin(self.foot_phase), torch.cos(self.foot_phase)), 1)
 
-        if self.cfg.action.use_increment:
+        # External phase clock (BD_X style, phase.mode == 'input')
+        if self._phase_mode == 'input':
+            _base_freq = getattr(_phase_cfg, 'base_freq', 1.0) or 1.0
+            _vel_scale = getattr(_phase_cfg, 'vel_scale', 1.0) or 1.0
+            self._ext_clock = ExternalPhaseClock(
+                dt=env.dt, num_envs=self.num_envs, num_legs=self.num_legs,
+                device=self.device, base_freq=_base_freq, vel_scale=_vel_scale,
+            )
+            self._ext_clock.reset(torch.arange(self.num_envs, device=self.device),
+                                  render=self.env.render or self.env.debug)
+        else:
+            self._ext_clock = None
+
+        # --- Action mode: increment (legacy) or absolute (BD_X style) ---
+        _action_mode_cfg = getattr(self.cfg.action, 'action_mode', None)
+        if _action_mode_cfg is not None:
+            self._action_mode = _action_mode_cfg
+        else:
+            # Backward compat: infer from use_increment
+            self._action_mode = 'increment' if self.cfg.action.use_increment else 'absolute'
+        assert self._action_mode in ('increment', 'absolute'), \
+            f"Unknown action.action_mode: '{self._action_mode}'. Must be 'increment' or 'absolute'."
+
+        self._lp_alpha = getattr(self.cfg.action, 'action_lowpass_alpha', 1.0)
+
+        if self._action_mode == 'increment':
             self.action_low = to_torch(self.cfg.action.inc_low_ranges, device=self.device)
             self.action_high = to_torch(self.cfg.action.inc_high_ranges, device=self.device)
         else:
-            self.action_low = to_torch(self.cfg.action.low_ranges, device=self.device)
-            self.action_high = to_torch(self.cfg.action.high_ranges, device=self.device)
+            # Absolute mode: scale network output to joint position range.
+            # Use abs_low/high_ranges if set, otherwise fall back to URDF limits.
+            abs_low = getattr(self.cfg.action, 'abs_low_ranges', None)
+            abs_high = getattr(self.cfg.action, 'abs_high_ranges', None)
+            dof_low = self.env.dof_pos_limits[:, 0]
+            dof_high = self.env.dof_pos_limits[:, 1]
+            joint_low = to_torch(abs_low, device=self.device) if abs_low else torch.as_tensor(dof_low, device=self.device)
+            joint_high = to_torch(abs_high, device=self.device) if abs_high else torch.as_tensor(dof_high, device=self.device)
             if self._phase_mode == 'output':
-                self.action_low[self.num_legs:self.num_legs + self.env.num_dofs] = torch.as_tensor(self.env.dof_pos_limits[:, 0], device=self.device)
-                self.action_high[self.num_legs:self.num_legs + self.env.num_dofs] = torch.as_tensor(self.env.dof_pos_limits[:, 1], device=self.device)
+                # 12-dim: [freq_low(2), joint_low(10)]
+                freq_low = to_torch(self.cfg.action.low_ranges[:self.num_legs], device=self.device)
+                freq_high = to_torch(self.cfg.action.high_ranges[:self.num_legs], device=self.device)
+                self.action_low = torch.cat([freq_low, joint_low])
+                self.action_high = torch.cat([freq_high, joint_high])
+            else:
+                # 10-dim: joints only
+                self.action_low = joint_low
+                self.action_high = joint_high
 
         # Validate action dim matches phase mode
         _action_dim = len(self.action_low)
@@ -99,6 +139,8 @@ class BIRLTask(BaseTask):
 
         self.current_joint_act = to_torch(self.env.default_dof_pos, device=self.device).repeat(self.num_envs, 1)
         self.previous_joint_act = self.current_joint_act.clone()
+        # Lowpass filter target (absolute mode only)
+        self._lp_target = self.current_joint_act.clone()
 
         self.ref_joint_action = to_torch(self.cfg.action.ref_joint_pos, device=self.device).repeat(self.num_envs, 1)
         self.joint_action_limit_low_over = torch.as_tensor(self.env.dof_pos_limits[:, 0]).repeat(self.num_envs, 1)
@@ -350,10 +392,13 @@ class BIRLTask(BaseTask):
         self.joint_pos[env_ids] = self.env.joint_pos_his.delay(self.delay_joint_steps)[env_ids]
         self.current_joint_act[env_ids] = self.env.default_dof_pos
         self.previous_joint_act[env_ids] = self.current_joint_act[env_ids].clone()
+        self._lp_target[env_ids] = self.current_joint_act[env_ids].clone()
 
         self.joint_pos_error = self.joint_act_for_pd - self.joint_pos
         self.phase_modulator.reset(convert_phi=self.convert_phi, env_ids=env_ids,
                                    render=self.env.render or self.env.epochs > 1 or self.env.tcn_name is not None)
+        if self._ext_clock is not None:
+            self._ext_clock.reset(env_ids, render=self.env.render)
         self.pm_phase = torch.cat((torch.sin(self.foot_phase), torch.cos(self.foot_phase)), 1)
         self.static_flag = torch.where(torch.norm(self.commands[:, :3], dim=1, keepdim=True) < 0.15, False, True).float()
         if self.cfg.terrain.curriculum:
@@ -433,6 +478,11 @@ class BIRLTask(BaseTask):
         self.last_ang_vel_z = self.base_ang_vel[:, [2]].clone()
         if self._use_act_delay and self.env.common_step_counter % 200 == 0:
             self._act_delay_steps = random.randint(*getattr(self.cfg.action, 'actuator_delay_range', [1, 3]))
+
+        # External phase clock: advance from velocity command
+        if self._ext_clock is not None:
+            cmd_vel_norm = torch.norm(self.commands[:, :2], dim=1, keepdim=True)
+            self._ext_clock.update(cmd_vel_norm)
 
         # Air time accumulation: track time each foot spends in swing phase
         self._prev_foot_swing_mask = self.foot_swing_mask.clone()
@@ -549,10 +599,15 @@ class BIRLTask(BaseTask):
         if self.env.render and self.env.common_step_counter <= 1:
             pass
         else:
-            if self.cfg.action.use_increment:
+            if self._action_mode == 'increment':
                 self.current_joint_act += joint_out * self.env.dt
             else:
-                self.current_joint_act = joint_out
+                # Absolute mode: lowpass filter the raw position target
+                if self._lp_alpha < 1.0:
+                    self._lp_target = self._lp_alpha * joint_out + (1.0 - self._lp_alpha) * self._lp_target
+                else:
+                    self._lp_target = joint_out
+                self.current_joint_act = self._lp_target
         self.current_joint_act = torch.clip(self.current_joint_act, self.joint_action_limit_low,self.joint_action_limit_high)
         self.action_history.append(self.current_joint_act.clone())
         self.previous_joint_act = self.current_joint_act.clone()

@@ -19,6 +19,15 @@ obs_slot = obs_builder_mod.obs_slot
 from config.loader import load_config, config_to_dict
 
 
+class MockExtClock:
+    """Minimal mock of ExternalPhaseClock for obs builder tests."""
+    def __init__(self, num_envs):
+        self._sin_cos = torch.zeros(num_envs, 4)
+
+    def sin_cos(self):
+        return self._sin_cos
+
+
 class MockTask:
     """Minimal mock of BIRLTask/MIRLTask for obs builder tests."""
 
@@ -41,6 +50,8 @@ class MockTask:
         self._ref_joint_pos_now = torch.zeros(num_envs, 10, device=device)
         self._ref_joint_vel_now = torch.zeros(num_envs, 10, device=device)
         self._ref_phase_progress = torch.zeros(num_envs, 1, device=device)
+        # BD_X external phase clock
+        self._ext_clock = MockExtClock(num_envs)
 
 
 class TestSlotRegistry:
@@ -48,7 +59,7 @@ class TestSlotRegistry:
         expected = [
             'commands_3', 'commands_8', 'base_euler', 'base_ang_vel',
             'joint_pos_err', 'joint_vel', 'joint_tracking_err',
-            'phase_sin_cos', 'phase_freq', 'base_lin_vel',
+            'phase_sin_cos', 'phase_freq', 'phase_clock', 'base_lin_vel',
             'ref_joint_pos_err', 'ref_joint_vel', 'ref_phase_progress',
         ]
         for name in expected:
@@ -59,7 +70,7 @@ class TestSlotRegistry:
             'commands_3': 3, 'commands_8': 8,
             'base_euler': 2, 'base_ang_vel': 3,
             'joint_pos_err': 10, 'joint_vel': 10, 'joint_tracking_err': 10,
-            'phase_sin_cos': 4, 'phase_freq': 2,
+            'phase_sin_cos': 4, 'phase_freq': 2, 'phase_clock': 4,
             'base_lin_vel': 3,
             'ref_joint_pos_err': 10, 'ref_joint_vel': 10, 'ref_phase_progress': 1,
         }
@@ -142,6 +153,22 @@ class TestObsBuilder:
         obs = builder.build()
         assert obs.abs().sum() > 0
 
+    def test_bdx_layout(self):
+        task = MockTask()
+        slots = [
+            'commands_3', 'base_euler', 'base_ang_vel',
+            'joint_pos_err', 'joint_vel', 'joint_tracking_err',
+            'phase_clock',
+        ]
+        builder = ObsBuilder(task, slot_names=slots)
+        assert builder.obs_dim == 42  # 3+2+3+10+10+10+4
+
+    def test_phase_clock_output_shape(self):
+        task = MockTask(num_envs=8)
+        builder = ObsBuilder(task, slot_names=['phase_clock'])
+        obs = builder.build()
+        assert obs.shape == (8, 4)
+
 
 class TestObsConfigInYaml:
     def test_birl_config_has_obs_slots(self):
@@ -170,7 +197,7 @@ class TestObsConfigInYaml:
     def test_all_config_slots_are_registered(self):
         """Every slot name in every config must exist in the registry."""
         configs_dir = os.path.join(os.path.dirname(__file__), '..', 'configs')
-        for name in ['birl.yaml', 'birl_fwd.yaml', 'birl_teacher.yaml', 'mirl.yaml', 'mirl_fwd.yaml']:
+        for name in ['birl.yaml', 'birl_fwd.yaml', 'birl_teacher.yaml', 'mirl.yaml', 'mirl_fwd.yaml', 'bdx.yaml']:
             cfg = load_config(os.path.join(configs_dir, name))
             if cfg.observation and cfg.observation.slots:
                 for slot in cfg.observation.slots:
@@ -189,3 +216,10 @@ class TestObsConfigInYaml:
         task = MockTask()
         builder = ObsBuilder(task, slot_names=cfg.observation.slots)
         assert builder.obs_dim == 64
+
+    def test_bdx_obs_dim_matches_expected(self):
+        """ObsBuilder dim from bdx.yaml should match expected 42."""
+        cfg = load_config(os.path.join(os.path.dirname(__file__), '..', 'configs', 'bdx.yaml'))
+        task = MockTask()
+        builder = ObsBuilder(task, slot_names=cfg.observation.slots)
+        assert builder.obs_dim == 42

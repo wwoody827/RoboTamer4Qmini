@@ -26,18 +26,28 @@ def build_manifest(params):
     obs_per_step = policy_cfg.get('num_observations', 0) // obs_history
     phase_mode = phase_cfg.get('mode', 'output') if phase_cfg else 'output'
 
+    # Determine action_mode: explicit config field takes precedence, fall back to use_increment
+    action_mode_cfg = action_cfg.get('action_mode')
+    if action_mode_cfg is not None:
+        action_mode = action_mode_cfg
+    else:
+        action_mode = 'increment' if action_cfg.get('use_increment', True) else 'absolute'
+
     manifest = {
-        'format_version': 2,
+        'format_version': 3,
         'task_type': task_cfg.get('cfg', 'BIRL'),
         'obs_per_step': obs_per_step,
         'obs_history': obs_history,
         'obs_slots': obs_cfg.get('slots') if obs_cfg else None,
         'obs_total': policy_cfg.get('num_observations', 0),
         'action_dim': policy_cfg.get('num_actions', 0),
-        'action_mode': 'increment' if action_cfg.get('use_increment', True) else 'absolute',
+        'action_mode': action_mode,
+        'action_lowpass_alpha': float(action_cfg.get('action_lowpass_alpha', 1.0)),
         'action_scaling': {
-            'low': action_cfg.get('inc_low_ranges', action_cfg.get('low_ranges')),
-            'high': action_cfg.get('inc_high_ranges', action_cfg.get('high_ranges')),
+            'inc_low': _to_list(action_cfg.get('inc_low_ranges')),
+            'inc_high': _to_list(action_cfg.get('inc_high_ranges')),
+            'abs_low': _to_list(action_cfg.get('abs_low_ranges')),
+            'abs_high': _to_list(action_cfg.get('abs_high_ranges')),
         },
         'ref_joint_pos': action_cfg.get('ref_joint_pos'),
         'pd_gains': {
@@ -54,6 +64,8 @@ def build_manifest(params):
             'mode': phase_mode,
             'num_legs': 2,
             'static_cmd_threshold': 0.15,
+            'base_freq': float(phase_cfg.get('base_freq', 1.0)) if phase_cfg else 1.0,
+            'vel_scale': float(phase_cfg.get('vel_scale', 1.0)) if phase_cfg else 1.0,
         },
         'use_teacher_obs': task_cfg.get('use_teacher_obs', False),
         'hidden_layers': list(policy_cfg.get('hidden_layers', [512, 256])),

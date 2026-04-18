@@ -139,6 +139,12 @@ def _phase_freq(task):
     return (task.pm_f * 0.3 - 1.0) * task.static_flag
 
 
+@obs_slot('phase_clock', dim=4)
+def _phase_clock(task):
+    """sin/cos of external phase clock × static_flag (BD_X style, phase.mode=input)."""
+    return task._ext_clock.sin_cos() * task.static_flag
+
+
 @obs_slot('base_lin_vel', dim=3)
 def _base_lin_vel(task):
     """Base linear velocity (privileged — teacher obs only)."""

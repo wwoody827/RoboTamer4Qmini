@@ -15,6 +15,8 @@ task:
 #   none:   no phase signal (MIRL legacy, 10-dim action)
 phase:
   mode: output
+  base_freq: 1.0           # Hz, for 'input' mode (BD_X style)
+  vel_scale: 1.0           # freq += vel_scale * ||cmd_vel||, for 'input' mode
 
 # Observation slots — ordered list of named slots to concatenate per step.
 # Total obs = len(slots_per_step) × obs_history. See env/obs_builder.py for slot defs.
@@ -71,6 +73,8 @@ algorithm:
   max_grad_norm: 1.
 
 action:
+  action_mode: increment      # 'increment' (legacy) | 'absolute' (BD_X style)
+  action_lowpass_alpha: 1.0   # 1.0 = no filter; 0.75 = BD_X-style smoothing
   action_limit_up: null
   action_limit_low: null
   high_ranges: [3., 3., 1., 1., 1., 1., 1., 1., 1., 1., 1., 1.]
@@ -79,6 +83,8 @@ action:
   use_increment: true
   inc_high_ranges: [10., 10., 10., 10., 10., 10., 10., 10., 10., 10.]
   inc_low_ranges:  [-10., -10., -10., -10., -10., -10., -10., -10., -10., -10.]
+  abs_high_ranges: null   # joint position upper bounds for absolute mode; null = use URDF limits
+  abs_low_ranges: null    # joint position lower bounds for absolute mode; null = use URDF limits
   use_actuator_delay: false
   actuator_delay_range: [1, 3]
   use_actuator_filter: false
