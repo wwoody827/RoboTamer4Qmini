@@ -179,8 +179,13 @@ class BIRLTask(BaseTask):
         for _ in range(self.net_out_history.maxlen):
             self.net_out_history.append(torch.zeros_like(self.action_low).repeat(self.num_envs, 1))
 
-        # --- Foot masks (phase-based or contact-force-based) ---
-        if self._foot_mask_mode == 'contact':
+        # --- Foot masks (phase-based, contact-force-based, or ext-clock-based) ---
+        if self._phase_mode == 'input':
+            # BD_X: derive desired swing/stance from external clock phase
+            ext_phase = self._ext_clock.phase_with_offset  # [num_envs, num_legs]
+            self.foot_support_mask = (ext_phase < self.convert_phi)
+            self.foot_swing_mask = ~self.foot_support_mask
+        elif self._foot_mask_mode == 'contact':
             self.foot_swing_mask = (self.env.foot_frc < 1.0)
             self.foot_support_mask = (self.env.foot_frc >= 10.0)
         else:
@@ -193,7 +198,7 @@ class BIRLTask(BaseTask):
         # --- Air time tracking (always initialized; reward weight gates usage) ---
         self.foot_air_time = torch.zeros(self.num_envs, self.num_legs, dtype=torch.float, device=self.device)
         self._pre_reset_air_time = torch.zeros(self.num_envs, self.num_legs, dtype=torch.float, device=self.device)
-        self._prev_foot_swing_mask = torch.zeros(self.num_envs, self.num_legs, dtype=torch.bool, device=self.device)
+        self._prev_foot_in_air = torch.zeros(self.num_envs, self.num_legs, dtype=torch.bool, device=self.device)
 
         # --- Reference clip state (populated by _load_ref_clips if paths provided) ---
         self._has_ref = False
@@ -400,8 +405,12 @@ class BIRLTask(BaseTask):
             self._update_terrain_curriculum(env_ids)
         self._resample_commands(env_ids)
 
-        # Foot masks: contact-force or phase-based
-        if self._foot_mask_mode == 'contact':
+        # Foot masks: ext-clock, contact-force, or phase-based
+        if self._phase_mode == 'input':
+            ext_phase = self._ext_clock.phase_with_offset
+            self.foot_support_mask = (ext_phase < self.convert_phi)
+            self.foot_swing_mask = ~self.foot_support_mask
+        elif self._foot_mask_mode == 'contact':
             self.foot_swing_mask = (self.env.foot_frc < 1.0)
             self.foot_support_mask = (self.env.foot_frc >= 10.0)
         else:
@@ -448,8 +457,12 @@ class BIRLTask(BaseTask):
         self.foot_phase = self.phase_modulator.phase
         self.pm_phase = torch.cat((torch.sin(self.foot_phase), torch.cos(self.foot_phase)), 1)
 
-        # Foot masks: contact-force or phase-based
-        if self._foot_mask_mode == 'contact':
+        # Foot masks: ext-clock, contact-force, or phase-based
+        if self._phase_mode == 'input':
+            ext_phase = self._ext_clock.phase_with_offset
+            self.foot_support_mask = (ext_phase < self.convert_phi)
+            self.foot_swing_mask = ~self.foot_support_mask
+        elif self._foot_mask_mode == 'contact':
             self.foot_swing_mask = (self.env.foot_frc < 1.0)
             self.foot_support_mask = (self.env.foot_frc >= 10.0)
         else:
@@ -479,11 +492,12 @@ class BIRLTask(BaseTask):
             cmd_vel_norm = torch.norm(self.commands[:, :2], dim=1, keepdim=True)
             self._ext_clock.update(cmd_vel_norm)
 
-        # Air time accumulation: track time each foot spends in swing phase
-        self._prev_foot_swing_mask = self.foot_swing_mask.clone()
+        # Air time accumulation: always uses actual contact forces (not clock masks),
+        # so it measures real time in the air.
+        actual_in_air = (self.env.foot_frc < 1.0)
         self.foot_air_time += self.env.dt
         self._pre_reset_air_time = self.foot_air_time.clone()  # snapshot before reset
-        self.foot_air_time *= self.foot_swing_mask.float()     # reset to 0 on contact
+        self.foot_air_time *= actual_in_air.float()            # reset to 0 on ground contact
 
         # Advance reference frame
         self._advance_ref_frames()
@@ -746,22 +760,36 @@ class BIRLTask(BaseTask):
 
         leg_width_rew = -torch.norm(torch.abs(self.env.foot_pos_hd[:, [1, 4]] - self.env.base_pos_hd[:, [1]]) - 0.14, dim=1, keepdim=True)
 
-        # Foot phase reward: only meaningful when phase.mode == 'output'
+        # Foot phase reward: penalizes legs being in-phase (should be anti-phase)
         if self._phase_mode == 'output':
             lsin = torch.sin(self.foot_phase.clone())
             lcos = torch.cos(self.foot_phase.clone())
             foot_phase_rew = -torch.norm(lsin[:, [0]] + lsin[:, [1]], dim=1, keepdim=True) ** 2
             foot_phase_rew += -torch.norm(lcos[:, [0]] + lcos[:, [1]], dim=1, keepdim=True) ** 2
             foot_phase_rew *= self.static_flag
+        elif self._phase_mode == 'input':
+            # BD_X: external clock guarantees anti-phase. Reward matching
+            # actual foot contact to clock-defined swing/stance schedule.
+            # foot_swing_mask is already set from ext_clock above.
+            actual_swing = (self.env.foot_frc < 1.0)     # feet actually in air
+            actual_support = (self.env.foot_frc >= 10.0)  # feet actually on ground
+            phase_match = (
+                torch.sum((actual_swing & self.foot_swing_mask).float(), dim=1, keepdim=True)
+                + torch.sum((actual_support & self.foot_support_mask).float(), dim=1, keepdim=True)
+            ) / self.num_legs - 1.0  # normalized: 0 when no match, 1 when perfect
+            foot_phase_rew = phase_match * self.static_flag
         else:
             foot_phase_rew = torch.zeros(self.num_envs, 1, device=self.device)
 
-        # Air time reward: fires at touchdown, proportional to time foot was airborne
-        just_landed = self._prev_foot_swing_mask & self.foot_support_mask
+        # Air time reward: fires at actual touchdown, proportional to real time airborne
+        actual_in_air = (self.env.foot_frc < 1.0)
+        actual_on_ground = (self.env.foot_frc >= 10.0)
+        just_landed = self._prev_foot_in_air & actual_on_ground
         air_time_rew = torch.sum(
             (self._pre_reset_air_time - 0.1).clip(min=0.) * just_landed.float(),
             dim=1, keepdim=True
         ) * self.static_flag
+        self._prev_foot_in_air = actual_in_air.clone()
 
         # Mechanical power penalty: |torque × joint_vel|
         power_rew = -torch.sum(
@@ -800,7 +828,7 @@ class BIRLTask(BaseTask):
             leg_width_rew=leg_width_rew * balance_rew * w.get('leg_width_rew', 0.5),
             act_const=action_constraint_rew * balance_rew * w.get('act_const', 0.2),
             sa_const=sa_constraint_rew * balance_rew * w.get('sa_const', 0.1),
-            foot_phase=foot_phase_rew * balance_rew * w.get('foot_phase', 0.3),
+            foot_phase=foot_phase_rew * w.get('foot_phase', 0.3),
             jnt_pos_err=joint_pos_error_rew * balance_rew * w.get('jnt_pos_err', 0.2),
             act_smo=action_smooth_rew * balance_rew * w.get('act_smo', 1.5),
             net_smo=net_out_smooth_rew * balance_rew * w.get('net_smo', 0.001),

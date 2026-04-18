@@ -14,7 +14,7 @@ from collections import deque
 import collections
 import statistics
 from utils.common import clear_dir
-from utils.mirror import BIRLMirror
+from utils.mirror import BIRLMirror, BDXMirror
 from config.loader import load_config, CfgNode, config_to_dict, save_config
 from deploy.manifest import build_manifest, save_manifest
 from isaacgym.torch_utils import *
@@ -108,13 +108,16 @@ def train():
                      [task.num_observations], [task.num_actions])
 
     _phase_mode = task._phase_mode if hasattr(task, '_phase_mode') else 'output'
-    _use_mirror = getattr(cfg.runner, 'use_mirror_augmentation', False) and _phase_mode == 'output'
+    _use_mirror = getattr(cfg.runner, 'use_mirror_augmentation', False)
     _mirror_weight = getattr(cfg.runner, 'mirror_weight', 0.5)
-    _mirror = BIRLMirror(obs_history=3, device=device) if _use_mirror else None
-    if _mirror is not None:
-        print(f'[mirror] L↔R symmetry augmentation enabled (weight={_mirror_weight})')
-    elif getattr(cfg.runner, 'use_mirror_augmentation', False):
-        print(f'[mirror] skipped — mirror not yet supported for phase.mode={_phase_mode}')
+    if _use_mirror:
+        if _phase_mode == 'output':
+            _mirror = BIRLMirror(obs_history=3, device=device)
+        else:
+            _mirror = BDXMirror(obs_history=3, device=device)
+        print(f'[mirror] L↔R symmetry augmentation enabled (weight={_mirror_weight}, {_mirror.__class__.__name__})')
+    else:
+        _mirror = None
     if args.resume is not None:
         resume_model_dir = join(join('experiments', args.resume), 'model')
         saved_model_state_dict = torch.load(join(resume_model_dir, 'policy.pt'))

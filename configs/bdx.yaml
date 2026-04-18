@@ -29,6 +29,6 @@ observation:
 
 reward:
   pmf: 0.0
-  foot_phase: 0.0
+  foot_phase: 3.0
   power: 0.1
   air_time: 1.0

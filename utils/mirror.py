@@ -41,6 +41,108 @@ BIRL action layout (12 dims):
 import torch
 
 
+class BDXMirror:
+    """Mirror for BD_X-style policy (phase.mode=input, 42-dim obs, 10-dim action).
+
+    Obs layout (42 dims/step × 3 history = 126 total):
+      [0]     cmd_vx
+      [1]     cmd_vy        → negate
+      [2]     cmd_yaw       → negate
+      [3]     roll          → negate
+      [4]     pitch
+      [5]     ang_vel_x×0.5 → negate (roll rate)
+      [6]     ang_vel_y×0.5
+      [7]     ang_vel_z×0.5 → negate (yaw rate)
+      [8-12]  L joint pos − ref  → swap with R, negate all
+      [13-17] R joint pos − ref
+      [18-22] L joint vel × 0.1  → swap with R, negate all
+      [23-27] R joint vel × 0.1
+      [28-32] L tracking error   → swap with R, negate all
+      [33-37] R tracking error
+      [38-39] sin phase [L, R]   → swap
+      [40-41] cos phase [L, R]   → swap
+
+    Action layout (10 dims):
+      [0-4]  L joints (hip_yaw, hip_roll, hip_pitch, knee, ankle)
+      [5-9]  R joints
+      Mirror: L↔R swap + negate all.
+    """
+    STEP_DIM = 42
+
+    def __init__(self, obs_history: int = 3, device='cpu'):
+        self.obs_history = obs_history
+        self.device = device
+
+        step_perm, step_sign = self._build_step_transform()
+        self._obs_perm, self._obs_sign = self._expand_to_stack(step_perm, step_sign)
+        self._act_perm, self._act_sign = self._build_action_transform()
+        self.to(device)
+
+    def _build_step_transform(self):
+        D = self.STEP_DIM
+        perm = list(range(D))
+        sign = [1.0] * D
+
+        sign[1] = -1.0   # cmd_vy
+        sign[2] = -1.0   # cmd_yaw
+        sign[3] = -1.0   # roll
+        sign[5] = -1.0   # roll rate
+        sign[7] = -1.0   # yaw rate
+
+        # Joint sections: L[8:13] ↔ R[13:18], L[18:23] ↔ R[23:28], L[28:33] ↔ R[33:38]
+        for base in (8, 18, 28):
+            for i in range(5):
+                perm[base + i]     = base + 5 + i
+                perm[base + 5 + i] = base + i
+                sign[base + i]     = -1.0
+                sign[base + 5 + i] = -1.0
+
+        # Phase clock: [38=sin_L, 39=sin_R] → swap, [40=cos_L, 41=cos_R] → swap
+        perm[38], perm[39] = 39, 38
+        perm[40], perm[41] = 41, 40
+
+        return perm, sign
+
+    def _expand_to_stack(self, step_perm, step_sign):
+        full_perm, full_sign = [], []
+        for h in range(self.obs_history):
+            offset = h * self.STEP_DIM
+            full_perm += [offset + p for p in step_perm]
+            full_sign += step_sign
+        return (
+            torch.tensor(full_perm, dtype=torch.long),
+            torch.tensor(full_sign, dtype=torch.float32),
+        )
+
+    def _build_action_transform(self):
+        perm = list(range(10))
+        sign = [1.0] * 10
+        # L[0:5] ↔ R[5:10], negate all
+        for i in range(5):
+            perm[i]     = 5 + i
+            perm[5 + i] = i
+            sign[i]     = -1.0
+            sign[5 + i] = -1.0
+        return (
+            torch.tensor(perm, dtype=torch.long),
+            torch.tensor(sign, dtype=torch.float32),
+        )
+
+    def to(self, device):
+        self._obs_perm  = self._obs_perm.to(device)
+        self._obs_sign  = self._obs_sign.to(device)
+        self._act_perm  = self._act_perm.to(device)
+        self._act_sign  = self._act_sign.to(device)
+        self.device = device
+        return self
+
+    def mirror_obs(self, obs: torch.Tensor) -> torch.Tensor:
+        return obs[:, self._obs_perm] * self._obs_sign
+
+    def mirror_actions(self, actions: torch.Tensor) -> torch.Tensor:
+        return actions[:, self._act_perm] * self._act_sign
+
+
 class BIRLMirror:
     STEP_DIM = 44
 
