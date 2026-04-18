@@ -80,7 +80,6 @@ action:
   high_ranges: [3., 3., 1., 1., 1., 1., 1., 1., 1., 1., 1., 1.]
   low_ranges:  [0.5, 0.5, -1., -1., -1., -1., -1., -1., -1., -1., -1., -1.]
   ref_joint_pos: [0.4, -0.1, -1.5, 1., -1.3, -0.4, 0.1, 1.5, -1., 1.3]
-  use_increment: true
   inc_high_ranges: [10., 10., 10., 10., 10., 10., 10., 10., 10., 10.]
   inc_low_ranges:  [-10., -10., -10., -10., -10., -10., -10., -10., -10., -10.]
   abs_high_ranges: null   # joint position upper bounds for absolute mode; null = use URDF limits

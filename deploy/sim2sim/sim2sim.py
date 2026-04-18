@@ -68,15 +68,14 @@ def manifest_to_sim2sim_cfg(manifest, policy_path):
 
     This replaces the hand-maintained deploy/sim2sim/configs/*.yaml files.
     """
-    action_mode = manifest.get('action_mode', 'increment')
+    action_mode = manifest['action_mode']
     scaling = manifest['action_scaling']
-    # v3 manifest: separate inc_* and abs_* ranges; v2 compat: 'low'/'high' keys
     if action_mode == 'absolute':
-        act_low = scaling.get('abs_low') or scaling.get('low') or scaling.get('inc_low')
-        act_high = scaling.get('abs_high') or scaling.get('high') or scaling.get('inc_high')
+        act_low = scaling['abs_low']
+        act_high = scaling['abs_high']
     else:
-        act_low = scaling.get('inc_low') or scaling.get('low')
-        act_high = scaling.get('inc_high') or scaling.get('high')
+        act_low = scaling['inc_low']
+        act_high = scaling['inc_high']
 
     phase_mode = manifest['phase_modulator'].get('mode', 'output')
 
@@ -103,12 +102,11 @@ def manifest_to_sim2sim_cfg(manifest, policy_path):
         'obs_history':        manifest['obs_history'],
         'num_legs':           manifest['phase_modulator']['num_legs'],
         'static_cmd_threshold': manifest['phase_modulator'].get('static_cmd_threshold', 0.15),
-        # v3 manifest fields (defaults for v2 backward compat)
-        'action_mode':        manifest.get('action_mode', 'increment'),
-        'action_lowpass_alpha': manifest.get('action_lowpass_alpha', 1.0),
+        'action_mode':        manifest['action_mode'],
+        'action_lowpass_alpha': manifest['action_lowpass_alpha'],
         'phase_mode':         phase_mode,
-        'phase_base_freq':    manifest['phase_modulator'].get('base_freq', 1.0),
-        'phase_vel_scale':    manifest['phase_modulator'].get('vel_scale', 1.0),
+        'phase_base_freq':    manifest['phase_modulator']['base_freq'],
+        'phase_vel_scale':    manifest['phase_modulator']['vel_scale'],
     }
     return cfg
 
@@ -587,7 +585,6 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, duration=None, headless=Fal
         """Build BIRL observation vector.
         44-dim (current):  [cmd×3, roll, pitch, ang_vel×3, jp×10, jv×10, jerr×10, phase×4, freq×2]
         47-dim (teacher):  same + base_lin_vel×3 (privileged — body-frame linear velocity)
-        43-dim (legacy):   same but without cmd_vy — for checkpoints trained pre-April 2026.
         """
         q  = data.qpos[QPOS_START:QPOS_START + NUM_JOINTS]
         dq = data.qvel[QVEL_START:QVEL_START + NUM_JOINTS]
@@ -599,10 +596,8 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, duration=None, headless=Fal
         joint_pos_err = current_joint_act - q
         pm_phase_val  = np.concatenate([np.sin(pm.phase), np.cos(pm.phase)]) * static_flag
         pm_f_val      = (pm.frequency * 0.3 - 1.0) * static_flag
-        # Legacy 43-dim: only [cmd_vx, cmd_yaw] (no cmd_vy slot)
-        cmd_slot = np.array([commands[0], commands[2]], dtype=np.float32) if obs_dim == 43 else commands
         obs_parts = [
-            cmd_slot,           # 2 (legacy) or 3 (current)
+            commands,           # 3
             base_euler,         # 2: roll, pitch
             base_ang_vel * 0.5, # 3: ang vel
             joint_pos_rel,      # 10

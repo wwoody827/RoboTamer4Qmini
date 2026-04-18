@@ -136,7 +136,7 @@ class TestManifestConsistencyWithConfig:
 
     def test_increment_mode_from_config(self):
         cfg = load_config(os.path.join(os.path.dirname(__file__), '..', 'configs', 'birl.yaml'))
-        assert cfg.action.use_increment == True
+        assert cfg.action.action_mode == 'increment'
 
 
 class TestSaveManifest:

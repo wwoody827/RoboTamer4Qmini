@@ -55,7 +55,7 @@ class BaseTask(NullTask):
         self.foot_phase = self.phase_modulator.phase
         self.pm_phase = torch.cat((torch.sin(self.foot_phase), torch.cos(self.foot_phase)), 1)
 
-        if self.cfg.action.use_increment:
+        if self.cfg.action.action_mode == 'increment':
             self.action_low = to_torch(self.cfg.action.inc_low_ranges, device=self.device)
             self.action_high = to_torch(self.cfg.action.inc_high_ranges, device=self.device)
         else:
@@ -225,7 +225,7 @@ class BaseTask(NullTask):
         if self.env.render and self.env.common_step_counter <= 3:
             pass
         else:
-            if self.cfg.action.use_increment:
+            if self.cfg.action.action_mode == 'increment':
                 self.current_joint_act += net_out * self.env.dt
             else:
                 self.current_joint_act = net_out

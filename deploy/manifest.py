@@ -26,12 +26,7 @@ def build_manifest(params):
     obs_per_step = policy_cfg.get('num_observations', 0) // obs_history
     phase_mode = phase_cfg.get('mode', 'output') if phase_cfg else 'output'
 
-    # Determine action_mode: explicit config field takes precedence, fall back to use_increment
-    action_mode_cfg = action_cfg.get('action_mode')
-    if action_mode_cfg is not None:
-        action_mode = action_mode_cfg
-    else:
-        action_mode = 'increment' if action_cfg.get('use_increment', True) else 'absolute'
+    action_mode = action_cfg.get('action_mode', 'increment')
 
     manifest = {
         'format_version': 3,

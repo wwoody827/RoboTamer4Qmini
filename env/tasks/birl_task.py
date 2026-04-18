@@ -93,13 +93,8 @@ class BIRLTask(BaseTask):
         else:
             self._ext_clock = None
 
-        # --- Action mode: increment (legacy) or absolute (BD_X style) ---
-        _action_mode_cfg = getattr(self.cfg.action, 'action_mode', None)
-        if _action_mode_cfg is not None:
-            self._action_mode = _action_mode_cfg
-        else:
-            # Backward compat: infer from use_increment
-            self._action_mode = 'increment' if self.cfg.action.use_increment else 'absolute'
+        # --- Action mode: increment or absolute (BD_X style) ---
+        self._action_mode = self.cfg.action.action_mode
         assert self._action_mode in ('increment', 'absolute'), \
             f"Unknown action.action_mode: '{self._action_mode}'. Must be 'increment' or 'absolute'."
 
