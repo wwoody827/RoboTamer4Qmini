@@ -4,12 +4,8 @@ YAML-based config loader with inheritance and validation.
 Usage:
     from config.loader import load_config
 
-    # Load from YAML (new way)
     cfg = load_config('configs/birl_fwd.yaml')
     cfg = load_config('configs/birl_fwd.yaml', overrides={'reward.fwd_vel': 3.0})
-
-    # Load from legacy Python class (backward compat)
-    cfg = load_config('BIRL_Fwd')
 
 Config access:
     cfg.task.cfg          # 'BIRL'

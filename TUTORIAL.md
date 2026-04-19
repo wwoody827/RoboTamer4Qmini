@@ -14,27 +14,36 @@ cd ~/code/RoboTamer4Qmini
 ### New run
 
 ```bash
-python train.py --config BIRL --name my_run
+python train.py --config configs/birl_fwd.yaml --name my_run
 ```
 
 ### Resume from a checkpoint
 
 ```bash
-python train.py --config BIRL --name my_run --resume my_run
+python train.py --config configs/birl_fwd.yaml --name my_run --resume my_run
 ```
+
+### Other config options
+
+| Config | Phase mode | Action dim | Notes |
+|---|---|---|---|
+| `configs/birl_fwd.yaml` | `output` | 12 | BIRL baseline (policy outputs leg frequency) |
+| `configs/bdx.yaml` | `input` | 10 | BD_X style, external phase clock from cmd velocity |
+| `configs/mirl_fwd.yaml` | `none` | 10 | MIRL, no phase signal; pairs with reference clips |
 
 ### Useful training flags
 
 | Flag | Default | Description |
 |---|---|---|
 | `--name` | `test` | Experiment name. Saves to `experiments/<name>/` |
-| `--config` | `config.Base` | Config file to use (`BIRL` or `Base`) |
+| `--config` | `configs/birl_fwd.yaml` | Path to YAML config (supports `_base:` inheritance) |
 | `--resume` | None | Resume from `experiments/<name>/model/policy.pt` |
 | `--num_envs` | from config | Override number of parallel environments |
 | `--max_iterations` | from config | Override max training iterations |
 | `--render` | False | Show Isaac Gym viewer during training |
 | `--fix_cam` | False | Lock camera on robot 0 |
 | `--rl_device` | `cuda:0` | Device to run on (`cuda:0`, `cpu`, etc.) |
+| `--sim2sim_interval` | 0 | Run MuJoCo sim2sim eval every N iters (0 = off) |
 
 Models are saved to `experiments/<name>/model/` every `save_interval` iterations (default: 200).
 

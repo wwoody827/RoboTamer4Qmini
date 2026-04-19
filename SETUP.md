@@ -73,7 +73,7 @@ conda activate qmini
 
 ```bash
 cd ~/code/RoboTamer4Qmini
-python train.py --config BIRL --name <run_name>
+python train.py --config configs/birl_fwd.yaml --name <run_name>
 ```
 
 ### Play (evaluate pre-trained weights)
@@ -106,33 +106,3 @@ Then open [http://localhost:6006](http://localhost:6006).
 > pip install protobuf==3.20.3
 > ```
 
----
-
-## Visualizer
-
-[visualizer.py](visualizer.py) receives live UDP broadcasts from the robot and displays real-time plots.
-
-### Usage
-
-```bash
-python3 visualizer.py [--port 9870] [--history 200]
-```
-
-| Argument | Default | Description |
-|---|---|---|
-| `--port` | `9870` | UDP port to listen on |
-| `--history` | `200` | Frames to keep (200 = ~10s at 20Hz) |
-
-### Requirements
-
-- Robot machine must be on the same LAN subnet
-- Robot must be running `run_interface` in mode 1, 2, 3, or 5
-- Firewall must allow inbound UDP on the chosen port
-
-### Troubleshooting
-
-| Problem | Fix |
-|---|---|
-| No data received | Check same subnet; check firewall allows UDP 9870 |
-| `TkAgg` backend error | `sudo apt install python3-tk` or change `matplotlib.use('TkAgg')` to `'Qt5Agg'` |
-| Plots lag | Reduce `--history` (e.g. `--history 50`) |

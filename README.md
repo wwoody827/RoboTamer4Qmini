@@ -29,23 +29,24 @@ Shandong University, China<br>
 ## Code Structure
    ```
 RoboTamer4Qmini/
-   ├── assets/                 # The URDF model of our robot
-   ├── config/                 # Configuration files
-   ├── env/                    # Simulation environments
-   ├── experiments/            # Pre-trained models and evaluated results
+   ├── assets/                 # URDF model of the robot
+   ├── configs/                # YAML configuration files (with `_base:` inheritance)
+   ├── config/                 # Config loader (loads configs/*.yaml)
+   ├── env/                    # Simulation environments + unified BIRLTask
+   ├── experiments/            # Trained models and evaluation results
    ├── model/                  # Neural network architectures
-   ├── utils/                  # Utility functions
-   ├── export_pt2onnx.py       # To export the *.pt pre-trained models to *.onnx Pre-trained models
-   ├── play.py                 # To evaluate the pre-trained models
-   ├── train.py                # To train models
-   ├── tune_pid.py             # To optimize PID parameters to minimize the discrepancy between simulation and real-world robot behavior.
-   ├── tune_urdf.py            # To load and view a urdf model of the robot.
-   ├── requirements.txt        # Additional environment dependencies
+   ├── rl/                     # PPO algorithm + runner
+   ├── deploy/                 # ONNX export + MuJoCo sim2sim
+   ├── utils/                  # Utility functions (mirror aug, etc.)
+   ├── docs/rewards.md         # Reward term reference
+   ├── export_pt2onnx.py       # Export `.pt` checkpoint to `.onnx`
+   ├── play.py                 # Evaluate a trained policy in Isaac Gym
+   ├── train.py                # Train a policy
+   ├── requirements.txt        # Python dependencies
    └── README.md
    ```
 
 ### Notes
-* Some paths are hard-coded in _play.py_, _train.py_, _Base.py_, _tune_urdf.py_, and _tune_pid.py_. Be careful about them.
 * This repository is not maintained anymore. If you have any question, please send emails to info@vsislab.com.
 * The project can only be run after successful installation.
 
@@ -80,18 +81,20 @@ $  conda create -n isaac python==3.8 && conda activate isaac
 
 ### **To train (default:test):**
 ```bash
-$ python train.py --config BIRL --name <name>
-```  
-- --name <str> # Experiment name (Default: 'test'), overrides settings in the config file
-  - --config <str> # Experiment configuration file (Default: 'config.Base'), overrides default configuration
-  - --resume <str> # Resume training from checkpoint (Default: test), requires specifying checkpoint 'path'
+$ python train.py --config configs/birl_fwd.yaml --name <name>
+```
+Other configs: `configs/bdx.yaml` (BD_X style, external phase clock) or `configs/mirl_fwd.yaml` (MIRL, no phase).
+
+  - --name <str> # Experiment name (Default: 'test'), overrides settings in the config file
+  - --config <str> # Path to YAML config (Default: 'configs/birl_fwd.yaml'), supports `_base:` inheritance
+  - --resume <str> # Resume training from checkpoint (Default: None), requires specifying experiment 'name'
   - --render # Boolean flag (Default: False), force display off at all times
   - --fix_cam # Boolean flag (Default: False), fix camera view on the robot in environment 0
-  - --horovod # Boolean flag (Default: False), enable Horovod multi-GPU training
   - --rl_device <str> # RL device (Default: 'cuda:0'), supports formats like 'cpu'/'cuda:0'
   - --num_envs <int> # Number of environments (Default: None), overrides config file settings
   - --seed <int> # Random seed (Default: None), overrides config file settings
   - --max_iterations <int> # Maximum number of iterations (Default: None), overrides config file settings
+  - --sim2sim_interval <int> # Run MuJoCo sim2sim eval every N training iterations (Default: 0, disabled)
 
 ### **To visualize the training logs in a browser:**
 ```bash

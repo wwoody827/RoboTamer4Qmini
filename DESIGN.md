@@ -4,16 +4,15 @@
 
 RL training framework for the **Unitree Qmini biped robot** (10 actuated joints, 5 per leg). Trains locomotion policies in Isaac Gym (GPU-parallel, 4096 envs), validates in MuJoCo sim2sim, and deploys to real hardware via C++ SDK.
 
-Two task types:
+A single unified task class ([env/tasks/birl_task.py](env/tasks/birl_task.py)) supports three phase modes, selected by `phase.mode` in the config:
 
-| | BIRL | MIRL |
-|---|---|---|
-| Purpose | Phase-modulated walking | Reference-clip imitation |
-| Action dim | 12 (2 leg freq + 10 joints) | 10 (joints only) |
-| Obs dim/step | 44 | 64 |
-| Total obs (3-frame history) | 132 | 192 |
-| Phase modulator | Yes | No |
-| Command slots | 3 (vx, vy, yaw) | 8 (vx, vy, yaw, height, 4 reserved) |
+| `phase.mode` | Action dim | Phase source | Used by |
+|---|---|---|---|
+| `output` | 12 (2 leg-freq + 10 joints) | Policy outputs freq → PhaseModulator integrates | BIRL (legacy baseline) |
+| `input`  | 10 (joints only) | External clock from velocity command | BD_X-style |
+| `none`   | 10 (joints only) | No phase signal | MIRL (reference-clip imitation) |
+
+Obs dim per step depends on the configured `observation.slots` list (each slot contributes its own dim). Total obs = slots_per_step × `observation.history`.
 
 ---
 
@@ -152,7 +151,7 @@ No other code changes needed.
 
 ## Reward System
 
-Reward weights are defined in config YAML, not in task code. Each reward term in `birl_task.py` / `mirl_task.py` reads its weight from `self.rew_weights`.
+Reward weights are defined in config YAML, not in task code. Each reward term in `env/tasks/birl_task.py` reads its weight from `self.rew_weights`. See [docs/rewards.md](docs/rewards.md) for a full breakdown of each term.
 
 ### Config
 
@@ -178,11 +177,9 @@ Set any weight to `0.0` to disable that term entirely.
 
 ### All reward terms
 
-**Shared (BIRL + MIRL):**
-`constant`, `base_heit`, `balance`, `fwd_vel`, `yaw_rat`, `lateral_vel`, `vertical_vel`, `ang_vel`, `twist`, `base_acc`, `foot_clr`, `foot_supt`, `foot_heit`, `leg_width_rew`, `act_const`, `sa_const`, `foot_phase`, `jnt_pos_err`, `act_smo`, `net_smo`, `net_out_val`, `foot_slip`, `foot_vz`, `foot_acc`, `foot_sft`, `jnt_vel`, `feet_py`, `feet_frc`, `joint_tor`, `pmf`, `heading`, `yaw_smooth`
+See [docs/rewards.md](docs/rewards.md) for per-term formulas and tuning notes. Complete list (all gated by weight, set to 0 to disable):
 
-**MIRL-specific:**
-`power`, `air_time`
+`constant`, `base_heit`, `balance`, `fwd_vel`, `yaw_rat`, `lateral_vel`, `vertical_vel`, `ang_vel`, `twist`, `base_acc`, `foot_clr`, `foot_supt`, `foot_heit`, `leg_width_rew`, `act_const`, `sa_const`, `foot_phase`, `jnt_pos_err`, `act_smo`, `net_smo`, `net_out_val`, `foot_slip`, `foot_vz`, `foot_acc`, `foot_sft`, `jnt_vel`, `feet_py`, `feet_frc`, `joint_tor`, `pmf`, `heading`, `yaw_smooth`, `power`, `air_time`, `jp_imit`, `jv_imit` (last two active only when `task.ref_clip_paths` is non-empty)
 
 ---
 
@@ -355,7 +352,7 @@ Imitation reward: `total = w_task * task_reward + w_imit * imitation_reward`
 
 ## Testing
 
-131 tests in `tests/`, all run without GPU or Isaac Gym.
+138 tests in `tests/`, all run without GPU or Isaac Gym.
 
 ```bash
 /home/woody/miniconda3/envs/qmini/bin/python -m pytest tests/ -v

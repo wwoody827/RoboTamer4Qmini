@@ -1,6 +1,5 @@
 import time
 import cv2
-import importlib
 import isaacgym
 import numpy as np
 import os

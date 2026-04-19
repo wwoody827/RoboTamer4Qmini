@@ -16,40 +16,46 @@ The robot has 10 actuated joints (5 per leg: hip_yaw, hip_roll, hip_pitch, knee,
 | File | Purpose |
 |------|---------|
 | `train.py` | Entry point for training |
-| `config/Base.py` | All hyperparameters and ranges |
-| `config/BIRL.py` | BIRL-specific overrides (extends Base) |
-| `config/MIRL.py` | MIRL base config (forward/backward expert) |
-| `config/MIRL_Fwd.py` | MIRL forward-only expert config |
-| `config/MIRL_Strafe.py` | MIRL sideways-only expert config |
-| `config/MIRL_Turn.py` | MIRL turning-only expert config |
-| `config/MIRL_Combined.py` | MIRL combined config with imitation loss |
+| `config/loader.py` | YAML config loader with `_base:` inheritance |
+| `configs/base.yaml` | All defaults (reward weights, DR, PD gains, obs slots, phase mode) |
+| `configs/birl.yaml` | Phase `output` mode (12-dim action, BIRL baseline) |
+| `configs/bdx.yaml` | Phase `input` mode (10-dim action, external clock, BD_X style) |
+| `configs/mirl*.yaml` | Phase `none` mode (10-dim action, reference clip imitation) |
 | `env/legged_robot.py` | Isaac Gym environment, physics, resets |
-| `env/tasks/birl_task.py` | Unified task class — handles BIRL, MIRL, and BD_X via config |
+| `env/tasks/birl_task.py` | Unified task class — all phase modes via config |
 | `env/tasks/null_task.py` | Abstract task interface + registry |
-| `env/utils/phase_modulator.py` | Leg phase oscillator (BIRL only) |
+| `env/obs_builder.py` | Config-driven observation construction (named slots) |
+| `env/utils/phase_modulator.py` | Internal leg phase oscillator + external phase clock |
+| `utils/mirror.py` | `BIRLMirror` (12-dim action) + `BDXMirror` (10-dim) for symmetry aug |
 | `export_pt2onnx.py` | Export `.pt` checkpoint to `.onnx` |
 | `deploy/sim2sim/sim2sim.py` | Interactive MuJoCo sim2sim |
 | `deploy/sim2sim/evaluate.py` | Batch evaluation + CSV + TensorBoard |
 | `deploy/manifest.py` | Shared manifest builder for export + sim2sim |
+| `docs/rewards.md` | Reward term reference |
 
 ---
 
 ## Training
 
 ```bash
-# BIRL — start fresh
+# BIRL baseline (phase.mode=output, 12-dim action)
 /home/woody/miniconda3/envs/qmini/bin/python train.py \
-    --config BIRL --name <run_name> \
+    --config configs/birl_fwd.yaml --name <run_name> \
     --sim2sim_interval 500 --num_envs 4096
 
-# MIRL forward expert
+# BD_X style (phase.mode=input, 10-dim action, external clock)
 /home/woody/miniconda3/envs/qmini/bin/python train.py \
-    --config MIRL_Fwd --name mirl_fwd_v1 \
+    --config configs/bdx.yaml --name bdx_v1 \
+    --sim2sim_interval 500 --num_envs 4096
+
+# MIRL forward expert (phase.mode=none, 10-dim action)
+/home/woody/miniconda3/envs/qmini/bin/python train.py \
+    --config configs/mirl_fwd.yaml --name mirl_fwd_v1 \
     --sim2sim_interval 500 --num_envs 4096
 
 # Resume from checkpoint
 /home/woody/miniconda3/envs/qmini/bin/python train.py \
-    --config BIRL --name <run_name> --resume <run_name> \
+    --config configs/birl_fwd.yaml --name <run_name> --resume <run_name> \
     --max_iterations 10000
 ```
 
@@ -103,17 +109,17 @@ Quick eval also runs automatically during training every `--sim2sim_interval` it
 
 ---
 
-## Two task types: BIRL vs MIRL
+## Phase modes
 
-| | BIRL | MIRL |
-|---|---|---|
-| Task class | `BIRLTask` | `MIRLTask` (extends BIRLTask) |
-| Config | `configs/birl_fwd.yaml` | `configs/mirl_fwd.yaml` etc. |
-| Obs dims | 44 per step × 3 = **132 total** | 64 per step × 3 = **192 total** |
-| Action dims | **12** (2 leg-freq + 10 joints) | **10** (joints only, no freq) |
-| Phase modulator | Yes — in obs + action | No — phase slots are zeros |
-| Command slots | 3 (vx, vy, yaw) | 8 (vx, vy, yaw, height, 0,0,0,0) |
-| Mode detection | `len(act_low) == 12` | `len(act_low) == 10` |
+A single unified task class (`BIRLTask`) handles all variants, selected by `phase.mode` in config:
+
+| `phase.mode` | Action dim | Phase source | Representative config |
+|---|---|---|---|
+| `output` | 12 (2 leg-freq + 10 joints) | Policy → PhaseModulator integrates | `configs/birl_fwd.yaml` (BIRL baseline) |
+| `input`  | 10 (joints only) | External clock, `freq = base + vel_scale·‖cmd‖` | `configs/bdx.yaml` |
+| `none`   | 10 (joints only) | No phase signal | `configs/mirl*.yaml` |
+
+Mirror augmentation: `BIRLMirror` (12-dim) or `BDXMirror` (10-dim), selected automatically from `phase.mode`.
 
 ---
 
@@ -141,7 +147,7 @@ Quick eval also runs automatically during training every `--sim2sim_interval` it
 | 0–1 | leg frequencies [Hz], scaled from [0.5, 3.5] |
 | 2–11 | joint position increments [rad/s], scaled from [-15, 15] |
 
-`use_increment = True` — actions are **deltas** added to current joint targets each policy step.
+Default `action.action_mode = increment` — actions are **deltas** added to current joint targets each policy step. `action.action_mode = absolute` switches to direct position targets with optional low-pass filter (`action_lowpass_alpha`).
 
 **`static_flag`** = 1 if `‖[vx, vy, yaw]‖ ≥ 0.15`, else 0 (zeroes phase signals when standing still).
 
@@ -171,16 +177,16 @@ Quick eval also runs automatically during training every `--sim2sim_interval` it
 
 No phase modulator. All 10 outputs are joint deltas: `joint_act += action * dt`.
 
-### Commands (config/MIRL*.py)
+### Commands (configs/mirl*.yaml)
 
 Each expert config enables only the relevant slot(s):
 
 | Config | vx range | vy range | yaw range |
 |--------|----------|----------|-----------|
-| `MIRL_Fwd` | [-0.3, 0.7] | [0, 0] | [0, 0] |
-| `MIRL_Strafe` | [0, 0] | [-0.3, 0.3] | [0, 0] |
-| `MIRL_Turn` | [0, 0] | [0, 0] | [-1, 1] |
-| `MIRL_Combined` | [-0.3, 0.7] | [-0.3, 0.3] | [-1, 1] |
+| `mirl_fwd.yaml` | [-0.3, 0.7] | [0, 0] | [0, 0] |
+| `mirl_strafe.yaml` | [0, 0] | [-0.3, 0.3] | [0, 0] |
+| `mirl_turn.yaml` | [0, 0] | [0, 0] | [-1, 1] |
+| `mirl_combined.yaml` | [-0.3, 0.7] | [-0.3, 0.3] | [-1, 1] |
 
 Slots with range `[0, 0]` are always zero — `_resample_commands` skips them entirely (avoids `random.choice([])` crash on single-direction configs).
 
@@ -214,9 +220,9 @@ Reward scaling via config: `w_imit` scales imitation, `w_task` scales all task r
 
 ```
 Step 1: train 3 experts (no clips):
-  MIRL_Fwd    → mirl_fwd_v1     (vx only)
-  MIRL_Strafe → mirl_strafe_v1  (vy only)
-  MIRL_Turn   → mirl_turn_v1    (yaw only)
+  configs/mirl_fwd.yaml    → mirl_fwd_v1     (vx only)
+  configs/mirl_strafe.yaml → mirl_strafe_v1  (vy only)
+  configs/mirl_turn.yaml   → mirl_turn_v1    (yaw only)
 
 Step 2: record reference clips from each expert:
   python deploy/sim2sim/sim2sim.py \
@@ -225,13 +231,13 @@ Step 2: record reference clips from each expert:
     --record_skill walk --record_loop --headless --duration 10
   (repeat for strafe → walk_strafe.npz, turn → walk_turn.npz)
 
-Step 3: fill in MIRL_Combined.ref_clip_paths, train combined:
-  python train.py --config MIRL_Combined --name mirl_combined_v1
+Step 3: set task.ref_clip_paths in configs/mirl_combined.yaml, then:
+  python train.py --config configs/mirl_combined.yaml --name mirl_combined_v1
 ```
 
 ---
 
-## Key reward terms (birl_task.py / mirl_task.py)
+## Key reward terms (env/tasks/birl_task.py — see docs/rewards.md for full list)
 
 | Name | Weight | What it does |
 |------|--------|--------------|
@@ -250,7 +256,7 @@ MIRL adds `jp_imit` and `jv_imit` when clips are loaded (see above).
 
 ---
 
-## Domain randomization (config/Base.py)
+## Domain randomization (configs/base.yaml)
 
 - Friction: `[0.2, 3.0]`
 - Mass: ×`[0.5, 1.5]`
@@ -318,8 +324,8 @@ The SDK must be updated to match the MIRL interface. Changes needed in `rl_contr
 
 ## Known issues / things to watch
 
-- **foot_slip_rew** in MIRL: lateral foot velocity is gated by `(1 - vy_walking)` where `vy_walking = |cmd_vy| > 0.1`. When strafing, the lateral penalty is correctly suppressed.
-- **action_constraint_rew** in MIRL: penalizes hip_yaw/hip_roll [0,1,5,6] from ref when not strafing — this is also gated by `(1 - vy_walking)`.
+- **foot_slip_rew**: lateral foot velocity is gated by `(1 - vy_walking)` where `vy_walking = |cmd_vy| > 0.1`. When strafing, the lateral penalty is correctly suppressed.
+- **action_constraint_rew**: penalizes hip_yaw/hip_roll [0,1,5,6] from ref when not strafing — this is also gated by `(1 - vy_walking)`.
 - Observation delay simulation adds up to ~600ms latency — main sim-to-real gap mitigator.
 
 ---
