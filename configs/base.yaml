@@ -2,7 +2,7 @@
 # Every experiment config inherits from this via _base: base.yaml
 
 task:
-  cfg: Base
+  cfg: BIRL
   use_teacher_obs: false
   foot_mask_mode: phase       # 'phase' (from phase modulator) | 'contact' (from contact forces)
   ref_clip_paths: []          # list of .npz paths for MIRL imitation; empty = pure RL
@@ -17,6 +17,7 @@ phase:
   mode: output
   base_freq: 1.0           # Hz, for 'input' mode (BD_X style)
   vel_scale: 1.0           # freq += vel_scale * ||cmd_vel||, for 'input' mode
+  support_ratio: 0.6       # fraction of phase cycle in support phase (0.6 = walk, 0.5 = run)
 
 # Observation slots — ordered list of named slots to concatenate per step.
 # Total obs = len(slots_per_step) × obs_history. See env/obs_builder.py for slot defs.

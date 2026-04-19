@@ -8,7 +8,6 @@ from env.utils.phase_modulator import PhaseModulator, ExternalPhaseClock
 from env.tasks.null_task import NullTask, register
 from isaacgym.torch_utils import *  # includes to_torch, torch_rand_float
 from scipy.spatial.transform import Rotation as R
-from env.tasks.base_task import BaseTask
 from env.obs_builder import ObsBuilder
 import random
 from env.utils.math import scale_transform, smallest_signed_angle_between_torch
@@ -18,24 +17,16 @@ import torch
 
 
 @register
-class BIRLTask(BaseTask):
-
-    # Class-level defaults so pure_observation() works when called from
-    # BaseTask.__init__ before our __init__ has finished setting instance attrs.
-    _has_ref = False
-    _phase_mode = 'output'
-    _foot_mask_mode = 'phase'
-    _action_mode = 'increment'
-    _ext_clock = None
+class BIRLTask(NullTask):
 
     def __init__(self, env: LeggedRobotEnv):
-        self.obs_builder = None  # set before super().__init__ which calls pure_observation()
-        super(BIRLTask, self).__init__(env)
+        super().__init__(env)
         self.env = env
         self.cmd_id = 0
         self.rew_names = None
         self.num_envs = env.num_envs
         self.num_legs = 2
+        self.fixed_commands = {}  # set by play.py to lock specific command dims
         self.rew_weights = self.cfg.reward.to_dict() if self.cfg.reward is not None else {}
 
         # --- Phase mode (explicit config, not inferred from action dim) ---
@@ -70,7 +61,8 @@ class BIRLTask(BaseTask):
             self.delay_joint_steps = 1
             self.delay_rate_steps = 1
             self.delay_angle_steps = 1
-        self.convert_phi = 1.2 * pi
+        _support_ratio = getattr(_phase_cfg, 'support_ratio', 0.6) if _phase_cfg is not None else 0.6
+        self.convert_phi = tau * _support_ratio
 
         # Phase modulator — always created (for pm_phase/pm_f tensors), but only
         # used in action/obs when _phase_mode == 'output'.
@@ -197,8 +189,6 @@ class BIRLTask(BaseTask):
 
         # --- Air time tracking (always initialized; reward weight gates usage) ---
         self.foot_air_time = torch.zeros(self.num_envs, self.num_legs, dtype=torch.float, device=self.device)
-        self._pre_reset_air_time = torch.zeros(self.num_envs, self.num_legs, dtype=torch.float, device=self.device)
-        self._prev_foot_in_air = torch.zeros(self.num_envs, self.num_legs, dtype=torch.bool, device=self.device)
 
         # --- Reference clip state (populated by _load_ref_clips if paths provided) ---
         self._has_ref = False
@@ -492,12 +482,9 @@ class BIRLTask(BaseTask):
             cmd_vel_norm = torch.norm(self.commands[:, :2], dim=1, keepdim=True)
             self._ext_clock.update(cmd_vel_norm)
 
-        # Air time accumulation: always uses actual contact forces (not clock masks),
-        # so it measures real time in the air.
+        # Air time accumulation: reset to 0 on ground contact, else += dt.
         actual_in_air = (self.env.foot_frc < 1.0)
-        self.foot_air_time += self.env.dt
-        self._pre_reset_air_time = self.foot_air_time.clone()  # snapshot before reset
-        self.foot_air_time *= actual_in_air.float()            # reset to 0 on ground contact
+        self.foot_air_time = (self.foot_air_time + self.env.dt) * actual_in_air.float()
 
         # Advance reference frame
         self._advance_ref_frames()
@@ -781,15 +768,13 @@ class BIRLTask(BaseTask):
         else:
             foot_phase_rew = torch.zeros(self.num_envs, 1, device=self.device)
 
-        # Air time reward: fires at actual touchdown, proportional to real time airborne
+        # Air time reward: continuous signal proportional to current airborne
+        # time per foot, saturated at 0.3s to prevent endless hovering.
         actual_in_air = (self.env.foot_frc < 1.0)
-        actual_on_ground = (self.env.foot_frc >= 10.0)
-        just_landed = self._prev_foot_in_air & actual_on_ground
         air_time_rew = torch.sum(
-            (self._pre_reset_air_time - 0.1).clip(min=0.) * just_landed.float(),
+            self.foot_air_time.clip(max=0.3) * actual_in_air.float(),
             dim=1, keepdim=True
         ) * self.static_flag
-        self._prev_foot_in_air = actual_in_air.clone()
 
         # Mechanical power penalty: |torque × joint_vel|
         power_rew = -torch.sum(

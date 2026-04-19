@@ -5,14 +5,14 @@ import os
 
 import env
 from .legged_robot import LeggedRobotEnv
-from .tasks import BaseTask
+from .tasks import NullTask
 from isaacgym.torch_utils import *
 import collections
 import torch
 
 
 class GymEnvWrapper:
-    def __init__(self, env: LeggedRobotEnv, task: BaseTask, residual_task=None,
+    def __init__(self, env: LeggedRobotEnv, task: NullTask, residual_task=None,
                  dynamic_params=None, debug: bool = False):
         self.env = env
         self.task = task

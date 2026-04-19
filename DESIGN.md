@@ -29,9 +29,8 @@ train.py
   |   |-- legged_robot.py    Isaac Gym environment, physics, resets
   |   |-- obs_builder.py     Config-driven observation construction
   |   |-- tasks/
-  |   |   |-- base_task.py   Command sampling, episode management
-  |   |   |-- birl_task.py   BIRL: obs, reward, action logic
-  |   |   |-- mirl_task.py   MIRL: extends BIRLTask with ref clips
+  |   |   |-- null_task.py   Abstract task interface + registry
+  |   |   |-- birl_task.py   Unified task: obs, reward, action for all phase modes
   |   |-- utils/
   |       |-- phase_modulator.py   Leg phase oscillator (BIRL)
   |       |-- math.py              Action scaling, transforms

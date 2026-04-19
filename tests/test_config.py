@@ -270,7 +270,7 @@ class TestRealConfigs:
 
     def test_base_loads(self, configs_dir):
         cfg = self._load(configs_dir, 'base.yaml')
-        assert cfg.task.cfg == 'Base'
+        assert cfg.task.cfg == 'BIRL'
         assert cfg.runner.num_envs == 4096
         assert cfg.algorithm.learning_rate == 0.001
 

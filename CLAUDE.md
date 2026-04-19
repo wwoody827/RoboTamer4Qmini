@@ -24,9 +24,8 @@ The robot has 10 actuated joints (5 per leg: hip_yaw, hip_roll, hip_pitch, knee,
 | `config/MIRL_Turn.py` | MIRL turning-only expert config |
 | `config/MIRL_Combined.py` | MIRL combined config with imitation loss |
 | `env/legged_robot.py` | Isaac Gym environment, physics, resets |
-| `env/tasks/birl_task.py` | BIRL: observation, reward, action logic |
-| `env/tasks/mirl_task.py` | MIRL: extends BIRLTask, see interface below |
-| `env/tasks/base_task.py` | Command resampling |
+| `env/tasks/birl_task.py` | Unified task class — handles BIRL, MIRL, and BD_X via config |
+| `env/tasks/null_task.py` | Abstract task interface + registry |
 | `env/utils/phase_modulator.py` | Leg phase oscillator (BIRL only) |
 | `export_pt2onnx.py` | Export `.pt` checkpoint to `.onnx` |
 | `deploy/sim2sim/sim2sim.py` | Interactive MuJoCo sim2sim |
