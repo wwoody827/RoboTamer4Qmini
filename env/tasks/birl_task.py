@@ -622,6 +622,33 @@ class BIRLTask(NullTask):
 
         return self.joint_act_for_pd
 
+    def terminate(self):
+        time_out = torch.unsqueeze(self.env.time_out_buf, 1)
+        twist_over = torch.abs(self.env.base_euler[:, [0]]) > 0.7
+        twist_over |= torch.abs(self.env.base_euler[:, [1]]) > 0.7
+
+        pos_over = self.env.base_pos_hd[:, [2]] < 0.2
+
+        jact_over = torch.sum(torch.logical_and(torch.abs(self.action_history[-1] - self.joint_action_limit_low_over) < 0.02,
+                                                torch.abs(self.joint_pos - self.joint_action_limit_low_over) < 0.02), dim=1,
+                              keepdim=True) >= 1
+        jact_over |= torch.sum(torch.logical_and(torch.abs(self.action_history[-1] - self.joint_action_limit_high_over) < 0.02,
+                                                 torch.abs(self.joint_pos - self.joint_action_limit_high_over) < 0.02), dim=1,
+                               keepdim=True) >= 1
+        con_over = torch.any(
+            torch.norm(self.env.contact_forces[:, self.env.termination_contact_indices, :], dim=-1, keepdim=True) > 1.,
+            dim=1)
+        if self.env.render or self.env.epochs > 1 or self.env.tcn_name is not None:
+            done = con_over | time_out | pos_over | twist_over
+            if torch.sum(torch.any(done, dim=-1)) > 10:
+                metrics = OrderedDict({"pos_over": pos_over, "twist_over": twist_over, 'time_out': time_out})
+                print(f'==============================================')
+                print(metrics)
+                print(f'==============================================')
+        else:
+            done = con_over | pos_over | twist_over | time_out | jact_over
+        return done
+
     def reward(self):
         constant_rew = to_torch([1.]).repeat(self.num_envs, 1)
         lin_vel_x_norm = torch.clip(torch.norm(self.commands[:, [0, 1]], dim=1, keepdim=True), min=0.3, max=2.) + 0.2
