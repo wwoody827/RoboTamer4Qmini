@@ -42,9 +42,9 @@ import torch
 
 
 class BDXMirror:
-    """Mirror for BD_X-style policy (phase.mode=input, 42-dim obs, 10-dim action).
+    """Mirror for BD_X-style policy (phase.mode=input, 43-dim obs, 10-dim action).
 
-    Obs layout (42 dims/step × 3 history = 126 total):
+    Obs layout (43 dims/step × 3 history = 129 total):
       [0]     cmd_vx
       [1]     cmd_vy        → negate
       [2]     cmd_yaw       → negate
@@ -61,13 +61,14 @@ class BDXMirror:
       [33-37] R tracking error
       [38-39] sin phase [L, R]   → swap
       [40-41] cos phase [L, R]   → swap
+      [42]    phase_freq_cmd     → identity (scalar, symmetric under L↔R)
 
     Action layout (10 dims):
       [0-4]  L joints (hip_yaw, hip_roll, hip_pitch, knee, ankle)
       [5-9]  R joints
       Mirror: L↔R swap + negate all.
     """
-    STEP_DIM = 42
+    STEP_DIM = 43
 
     def __init__(self, obs_history: int = 3, device='cpu'):
         self.obs_history = obs_history
@@ -100,6 +101,9 @@ class BDXMirror:
         # Phase clock: [38=sin_L, 39=sin_R] → swap, [40=cos_L, 41=cos_R] → swap
         perm[38], perm[39] = 39, 38
         perm[40], perm[41] = 41, 40
+
+        # [42] phase_freq_cmd: scalar, invariant under L↔R (identity).
+        # perm[42] = 42 and sign[42] = 1.0 are already set by the init above.
 
         return perm, sign
 

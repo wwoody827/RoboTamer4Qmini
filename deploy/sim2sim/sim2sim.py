@@ -78,6 +78,10 @@ def manifest_to_sim2sim_cfg(manifest, policy_path):
         act_high = scaling['inc_high']
 
     phase_mode = manifest['phase_modulator'].get('mode', 'output')
+    pm_block = manifest['phase_modulator']
+    freq_default = float(pm_block.get('freq_default', pm_block.get('base_freq', 2.5)))
+    freq_low = float(pm_block.get('freq_low', freq_default - 0.5))
+    freq_high = float(pm_block.get('freq_high', freq_default + 0.5))
 
     cfg = {
         'policy_path':        policy_path,
@@ -89,6 +93,7 @@ def manifest_to_sim2sim_cfg(manifest, policy_path):
         'cmd_vx':             0.5,
         'cmd_vy':             0.0,
         'cmd_yaw':            0.0,
+        'cmd_freq':           freq_default,
         'ref_joint_pos':      manifest['ref_joint_pos'],
         'kps':                manifest['pd_gains']['kps'],
         'kds':                manifest['pd_gains']['kds'],
@@ -105,8 +110,9 @@ def manifest_to_sim2sim_cfg(manifest, policy_path):
         'action_mode':        manifest['action_mode'],
         'action_lowpass_alpha': manifest['action_lowpass_alpha'],
         'phase_mode':         phase_mode,
-        'phase_base_freq':    manifest['phase_modulator']['base_freq'],
-        'phase_vel_scale':    manifest['phase_modulator']['vel_scale'],
+        'phase_freq_low':     freq_low,
+        'phase_freq_high':    freq_high,
+        'phase_freq_default': freq_default,
     }
     return cfg
 
@@ -133,25 +139,28 @@ class PhaseModulator:
 
 
 class ExternalPhaseClock:
-    """Numpy mirror of env/utils/phase_modulator.ExternalPhaseClock (BD_X style)."""
+    """Numpy mirror of env/utils/phase_modulator.ExternalPhaseClock (BD_X style).
 
-    def __init__(self, dt, num_legs=2, base_freq=1.0, vel_scale=1.0):
+    Frequency is an externally-supplied command (deploy-time adjustable),
+    not a function of velocity command magnitude.
+    """
+
+    def __init__(self, dt, num_legs=2, default_freq=2.5):
         self.dt = dt
         self.num_legs = num_legs
-        self.base_freq = base_freq
-        self.vel_scale = vel_scale
+        self.default_freq = default_freq
         self.phase = np.zeros(num_legs, dtype=np.float32)
-        self.frequency = np.ones(num_legs, dtype=np.float32) * base_freq
+        self.frequency = np.ones(num_legs, dtype=np.float32) * default_freq
         self._leg_offset = np.zeros(num_legs, dtype=np.float32)
         self._leg_offset[1] = np.pi  # anti-phase
 
     def reset(self):
         self.phase[:] = 0.0
-        self.frequency[:] = self.base_freq
+        self.frequency[:] = self.default_freq
 
-    def update(self, cmd_vel_norm):
-        """Advance phase: freq = base_freq + vel_scale * ||cmd_vel||."""
-        freq = self.base_freq + self.vel_scale * cmd_vel_norm
+    def update(self, freq):
+        """Advance phase using an externally-supplied frequency (Hz scalar)."""
+        freq = float(freq)
         self.frequency[:] = freq
         self.phase = (self.phase + tau * freq * self.dt) % tau
 
@@ -442,13 +451,15 @@ def build_mujoco_model(urdf_path, sim_dt, init_height=0.5, floor_friction=1.0, f
 # Main sim2sim loop
 # ---------------------------------------------------------------------------
 
-def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, duration=None, headless=False,
+def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, cmd_freq=None, duration=None, headless=False,
         stand_only=False, interactive=False,
-        record_path=None, record_skill="walk", record_loop=True, record_skip=20):
+        record_path=None, record_skill="walk", record_loop=True, record_skip=20,
+        video_path=None, video_fps=30, video_size=(1280, 720)):
     # Override commands if provided
     cmd_vx  = cmd_vx  if cmd_vx  is not None else cfg['cmd_vx']
     cmd_vy  = cmd_vy  if cmd_vy  is not None else cfg.get('cmd_vy', 0.0)
     cmd_yaw = cmd_yaw if cmd_yaw is not None else cfg['cmd_yaw']
+    cmd_freq = cmd_freq if cmd_freq is not None else cfg.get('cmd_freq', cfg.get('phase_freq_default', 2.5))
     duration = duration if duration is not None else cfg['simulation_duration']
 
     sim_dt      = cfg['simulation_dt']
@@ -556,13 +567,19 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, duration=None, headless=Fal
     pm = PhaseModulator(dt=policy_dt, num_legs=num_legs)
     pm.reset()
     ext_clock = None
+    freq_mid = None
+    freq_scale = None
     if is_bdx:
+        freq_default = cfg.get('phase_freq_default', cmd_freq)
+        freq_lo = cfg.get('phase_freq_low', freq_default - 0.5)
+        freq_hi = cfg.get('phase_freq_high', freq_default + 0.5)
+        freq_mid = 0.5 * (freq_lo + freq_hi)
+        freq_scale = max(0.5 * (freq_hi - freq_lo), 1e-6)
         ext_clock = ExternalPhaseClock(
-            dt=policy_dt, num_legs=num_legs,
-            base_freq=cfg.get('phase_base_freq', 1.0),
-            vel_scale=cfg.get('phase_vel_scale', 1.0),
+            dt=policy_dt, num_legs=num_legs, default_freq=freq_default,
         )
         ext_clock.reset()
+        print(f"[sim2sim] cmd_freq={cmd_freq:.3f} Hz  (train range [{freq_lo:.2f}, {freq_hi:.2f}])")
     lp_target = ref_joint.copy()  # lowpass state for absolute mode
 
     current_joint_act = ref_joint.copy()
@@ -650,7 +667,7 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, duration=None, headless=Fal
         return obs
 
     def get_obs_bdx():
-        """Build BD_X-style observation vector (phase.mode=input, 42-dim).
+        """Build BD_X-style observation vector (phase.mode=input, 43-dim).
 
         Layout matches bdx.yaml obs_slots:
           [0-2]   commands_3: vx, vy, yaw
@@ -660,6 +677,7 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, duration=None, headless=Fal
           [18-27] joint_vel × 0.1
           [28-37] joint_act − joint_pos (tracking error)
           [38-41] phase_clock: sin/cos of external phase × static_flag
+          [42]    phase_freq_cmd: normalized commanded frequency × static_flag
         """
         q  = data.qpos[QPOS_START:QPOS_START + NUM_JOINTS]
         dq = data.qvel[QVEL_START:QVEL_START + NUM_JOINTS]
@@ -670,6 +688,10 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, duration=None, headless=Fal
         joint_vel_sc  = dq * 0.1
         joint_pos_err = current_joint_act - q
         phase_clock   = ext_clock.sin_cos() * static_flag
+        freq_cmd_norm = np.array(
+            [((cmd_freq - freq_mid) / freq_scale) * static_flag],
+            dtype=np.float32,
+        )
         obs = np.concatenate([
             commands,            # 3
             base_euler,          # 2
@@ -678,6 +700,7 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, duration=None, headless=Fal
             joint_vel_sc,        # 10
             joint_pos_err,       # 10
             phase_clock,         # 4
+            freq_cmd_norm,       # 1
         ]).astype(np.float32)
         obs = np.clip(obs, -3.0, 3.0)
         return obs
@@ -730,8 +753,7 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, duration=None, headless=Fal
             if not stand_only:
                 # Select obs function based on phase mode
                 if is_bdx:
-                    cmd_vel_norm = np.linalg.norm(commands[:2])
-                    ext_clock.update(cmd_vel_norm)
+                    ext_clock.update(cmd_freq)
                     obs_now = get_obs_bdx()
                 elif is_mirl:
                     obs_now = get_obs_mirl()
@@ -800,8 +822,42 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, duration=None, headless=Fal
                       f"{vx_act:7.3f}  {vy_act:7.3f}  {cmd_str}")
 
     if headless:
+        # Optional offscreen video recording (works over SSH with MUJOCO_GL=egl).
+        # Renders the tracking camera at `video_fps` by sampling every N sim steps.
+        vwriter = None
+        renderer = None
+        cam = None
+        frame_stride = None
+        if video_path is not None:
+            import cv2
+            vw, vh = int(video_size[0]), int(video_size[1])
+            # MuJoCo's default offscreen framebuffer is 640x480 — bump it so the
+            # renderer can produce HD frames.
+            model.vis.global_.offwidth  = vw
+            model.vis.global_.offheight = vh
+            renderer = mujoco.Renderer(model, height=vh, width=vw)
+            cam = mujoco.MjvCamera()
+            cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+            cam.distance, cam.azimuth, cam.elevation = 3.0, 90, -20
+            # cam.lookat is updated each frame to track the base.
+            frame_stride = max(1, int(round(1.0 / (video_fps * sim_dt))))
+            os.makedirs(os.path.dirname(os.path.abspath(video_path)) or '.', exist_ok=True)
+            vwriter = cv2.VideoWriter(
+                video_path, cv2.VideoWriter_fourcc(*'mp4v'), video_fps, (vw, vh))
+            print(f"[sim2sim] Recording video → {video_path}  ({vw}x{vh} @ {video_fps}fps, stride={frame_stride})")
+
         while step < total_steps:
             _physics_step()
+            if vwriter is not None and step % frame_stride == 0:
+                cam.lookat[:] = data.qpos[:3]
+                renderer.update_scene(data, camera=cam)
+                rgb = renderer.render()
+                vwriter.write(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
+
+        if vwriter is not None:
+            vwriter.release()
+            renderer.close()
+            print(f"[sim2sim] Video saved: {video_path}")
         print(f"\nSim2Sim finished: {step * sim_dt:.1f}s simulated.")
     else:
         key_cb = cin.key_callback if cin is not None else None
@@ -858,6 +914,9 @@ def main():
     parser.add_argument('--cmd_vx',   type=float, default=None, help='Forward velocity (m/s)')
     parser.add_argument('--cmd_vy',   type=float, default=None, help='Lateral velocity (m/s)')
     parser.add_argument('--cmd_yaw',  type=float, default=None, help='Yaw rate (rad/s)')
+    parser.add_argument('--cmd_freq', type=float, default=None,
+                        help='Phase frequency command in Hz (BD_X / phase.mode=input only). '
+                             'Defaults to manifest phase.freq_default.')
     parser.add_argument('--duration', type=float, default=None, help='Duration (s)')
     parser.add_argument('--headless',    action='store_true', help='Run without viewer, print state to stdout')
     parser.add_argument('--stand_only', action='store_true', help='No policy — hold ref joint positions (standing pose only)')
@@ -869,7 +928,19 @@ def main():
     parser.add_argument('--record_skill', type=str,   default='walk', help='Skill label written into the clip (default: walk)')
     parser.add_argument('--record_loop',  action='store_true',        help='Mark clip as cyclic/looping (default: False)')
     parser.add_argument('--record_skip',  type=int,   default=20,     help='Skip first N policy steps before recording (default: 20 ≈ 0.3s)')
+    parser.add_argument('--video',        type=str,   default=None,   help='Offscreen-render video to this .mp4 path (forces --headless; SSH-friendly)')
+    parser.add_argument('--video_fps',    type=int,   default=30,     help='Output video framerate (default: 30)')
+    parser.add_argument('--video_size',   type=str,   default='1280x720', help='Video resolution WxH (default: 1280x720)')
     args = parser.parse_args()
+
+    # Offscreen rendering needs the EGL backend when there is no display (SSH).
+    if args.video is not None:
+        os.environ.setdefault('MUJOCO_GL', 'egl')
+        args.headless = True
+    try:
+        vw, vh = map(int, args.video_size.lower().split('x'))
+    except Exception:
+        parser.error(f"--video_size must be WxH, got {args.video_size!r}")
 
     if args.config is not None:
         # Explicit config file (legacy path — still supported)
@@ -894,10 +965,12 @@ def main():
     if args.floor_aniso:
         cfg['floor_aniso'] = True
     run(cfg, cmd_vx=args.cmd_vx, cmd_vy=args.cmd_vy, cmd_yaw=args.cmd_yaw,
+        cmd_freq=args.cmd_freq,
         duration=args.duration, headless=args.headless, stand_only=args.stand_only,
         interactive=args.interactive,
         record_path=args.record, record_skill=args.record_skill,
-        record_loop=args.record_loop, record_skip=args.record_skip)
+        record_loop=args.record_loop, record_skip=args.record_skip,
+        video_path=args.video, video_fps=args.video_fps, video_size=(vw, vh))
 
 
 if __name__ == '__main__':

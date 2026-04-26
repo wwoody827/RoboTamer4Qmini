@@ -76,7 +76,7 @@ def train():
     cfg_dict = collections.OrderedDict(config_to_dict(cfg))
     cfg_dict['policy'].update({'num_observations': task.num_observations, 'num_actions': task.num_actions,
                                'num_critic_obs': len(gym_env.task.critic_observation()[0])})
-    cfg_dict['action'].update({'action_limit_low': env.dof_pos_limits[:, 0].cpu().numpy(), 'action_limit_up': env.dof_pos_limits[:, 1].cpu().numpy()})
+    cfg_dict['action'].update({'action_limit_low': env.dof_pos_limits[:, 0].cpu().numpy().tolist(), 'action_limit_up': env.dof_pos_limits[:, 1].cpu().numpy().tolist()})
     cfg_dict['action'].update({'action_scale_low': cfg.action.low_ranges[2:], 'action_scale_up': cfg.action.high_ranges[2:]})
 
     save_config(CfgNode(cfg_dict), join(model_dir, "cfg.yaml"))

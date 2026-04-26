@@ -8,8 +8,12 @@ task:
 
 phase:
   mode: input
-  base_freq: 1.0
-  vel_scale: 1.0
+  # Phase frequency is now a deploy-time command. Policy sees a normalized
+  # freq scalar and sin/cos of the phase; during training we sample uniformly
+  # from [freq_low, freq_high] per env. At deploy, pass --cmd_freq.
+  freq_low: 2.0
+  freq_high: 3.0
+  freq_default: 2.5
 
 action:
   action_mode: absolute
@@ -26,6 +30,7 @@ observation:
     - joint_vel
     - joint_tracking_err
     - phase_clock
+    - phase_freq_cmd
 
 reward:
   pmf: 0.0

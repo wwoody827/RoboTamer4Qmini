@@ -112,18 +112,19 @@ class TestManifestBuild:
     def test_bdx_manifest(self):
         cfg = load_config(os.path.join(os.path.dirname(__file__), '..', 'configs', 'bdx.yaml'))
         d = config_to_dict(cfg)
-        d['policy']['num_observations'] = 126  # 42 * 3
+        d['policy']['num_observations'] = 129  # 43 * 3 (added phase_freq_cmd slot)
         d['policy']['num_actions'] = 10
         m = build_manifest(d)
         assert m['task_type'] == 'BIRL'
-        assert m['obs_per_step'] == 42
+        assert m['obs_per_step'] == 43
         assert m['action_dim'] == 10
         assert m['action_mode'] == 'absolute'
         assert m['action_lowpass_alpha'] == 0.75
         assert m['phase_modulator']['enabled'] == False
         assert m['phase_modulator']['mode'] == 'input'
-        assert m['phase_modulator']['base_freq'] == 1.0
-        assert m['phase_modulator']['vel_scale'] == 1.0
+        assert m['phase_modulator']['freq_low'] == 2.0
+        assert m['phase_modulator']['freq_high'] == 3.0
+        assert m['phase_modulator']['freq_default'] == 2.5
 
 
 class TestManifestConsistencyWithConfig:
@@ -227,12 +228,14 @@ class TestManifestToSim2simCfg:
     def test_bdx_sim2sim_cfg(self):
         bdx_cfg = load_config(os.path.join(os.path.dirname(__file__), '..', 'configs', 'bdx.yaml'))
         d = config_to_dict(bdx_cfg)
-        d['policy']['num_observations'] = 126
+        d['policy']['num_observations'] = 129  # 43 * 3
         d['policy']['num_actions'] = 10
         m = build_manifest(d)
         cfg = self._convert(m)
         assert cfg['action_mode'] == 'absolute'
         assert cfg['action_lowpass_alpha'] == 0.75
         assert cfg['phase_mode'] == 'input'
-        assert cfg['phase_base_freq'] == 1.0
-        assert cfg['phase_vel_scale'] == 1.0
+        assert cfg['phase_freq_low'] == 2.0
+        assert cfg['phase_freq_high'] == 3.0
+        assert cfg['phase_freq_default'] == 2.5
+        assert cfg['cmd_freq'] == 2.5

@@ -38,25 +38,22 @@ class PhaseModulator:
 
 
 class ExternalPhaseClock:
-    """Phase clock driven by velocity command magnitude (BD_X style).
+    """Phase clock driven by an externally-supplied frequency command.
 
-    Instead of the policy outputting leg frequencies, the phase is derived
-    from the commanded velocity:
-        freq = base_freq + vel_scale * ||cmd_vel||
-
-    Two legs are anti-phase (offset by pi). The policy receives sin/cos of
-    each leg's phase as an input observation, not an action output.
+    The phase frequency is now a deploy-time input (sampled per-env during
+    training, adjustable via CLI at deploy). Two legs are anti-phase
+    (offset by pi). The policy receives sin/cos of each leg's phase and
+    the normalized commanded frequency as input observations.
     """
 
-    def __init__(self, dt, num_envs, num_legs, device, base_freq=1.0, vel_scale=1.0):
+    def __init__(self, dt, num_envs, num_legs, device, default_freq=2.5):
         self.num_legs = num_legs
         self.num_envs = num_envs
         self.device = device
         self._dt = dt
-        self.base_freq = base_freq
-        self.vel_scale = vel_scale
+        self.default_freq = default_freq
         self._phase = torch.zeros(num_envs, num_legs, dtype=torch.float, device=device)
-        self._frequency = torch.ones(num_envs, num_legs, dtype=torch.float, device=device) * base_freq
+        self._frequency = torch.ones(num_envs, num_legs, dtype=torch.float, device=device) * default_freq
         # Anti-phase offset: leg 0 at 0, leg 1 at pi
         self._leg_offset = torch.zeros(num_envs, num_legs, dtype=torch.float, device=device)
         self._leg_offset[:, 1] = pi
@@ -66,15 +63,14 @@ class ExternalPhaseClock:
             self._phase[env_ids] = 0.0
         else:
             self._phase[env_ids] = torch_rand_float(0, tau, (len(env_ids), 1), device=self.device).expand(-1, self.num_legs)
-        self._frequency[env_ids] = self.base_freq
+        self._frequency[env_ids] = self.default_freq
 
-    def update(self, cmd_vel_norm):
-        """Advance phase based on velocity command magnitude.
+    def update(self, freq):
+        """Advance phase using an externally-supplied frequency command.
 
         Args:
-            cmd_vel_norm: [num_envs, 1] — ||[vx, vy]|| or ||[vx, vy, yaw]||
+            freq: [num_envs, 1] — commanded phase frequency in Hz.
         """
-        freq = self.base_freq + self.vel_scale * cmd_vel_norm  # [num_envs, 1]
         self._frequency = freq.expand(-1, self.num_legs)
         self._phase = (self._phase + tau * freq * self._dt) % tau
 

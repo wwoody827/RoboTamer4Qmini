@@ -1,0 +1,33 @@
+# BD_X slim v3 — make phase frequency a deploy-time command.
+#
+# v2 problem: gait was exaggerated (yaw_osc_rms ~11°, com_z_rms ~11cm, cadence
+# too low at 1.3-1.7 Hz). BIRL naturally converges to ~2.5 Hz and adjusts stride
+# length with speed. v2's external clock coupled freq to ||cmd||, forcing the
+# policy into a bad operating point.
+#
+# v3 change: freq is sampled uniformly per env from [2.0, 3.0] Hz during
+# training and exposed as an observation input. At deploy time the operator
+# can sweep the cadence directly (--cmd_freq) without retraining.
+#
+# Keeps v2's other fixes: foot_sft + feet_py revived, air_time off.
+_base: bdx.yaml
+
+phase:
+  freq_low: 2.0
+  freq_high: 3.0
+  freq_default: 2.5
+
+reward:
+  # v2-revived terms stay revived
+  foot_sft: 2.7
+  feet_py: 0.5
+
+  # still disabled (carryover from v2)
+  foot_vz: 0.0
+  foot_acc: 0.0
+  feet_frc: 0.0
+  sa_const: 0.0
+  act_const: 0.0
+  net_smo: 0.0
+  net_out_val: 0.0
+  air_time: 0.0

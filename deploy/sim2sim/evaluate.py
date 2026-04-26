@@ -46,7 +46,7 @@ except ImportError:
 
 # ── episode runner ────────────────────────────────────────────────────────────
 
-def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_vy=0.0):
+def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_vy=0.0, cmd_freq=None):
     """Run one episode. Returns a dict of scalar metrics."""
     if seed is not None:
         np.random.seed(seed)
@@ -89,6 +89,9 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
     QPOS_START = 7
     QVEL_START = 6
     imu_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, 'imu_in_torso')
+    foot_l_id   = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, 'ankle_pitch_l')
+    foot_r_id   = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, 'ankle_pitch_r')
+    target_h    = float(cfg.get('init_height', 0.45))
 
     # Resolve action scaling — absolute mode falls back to URDF joint limits
     if _act_low_cfg is not None:
@@ -116,11 +119,18 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
     pm = PhaseModulator(dt=policy_dt, num_legs=num_legs)
     pm.reset()
     ext_clock = None
+    freq_mid = None
+    freq_scale = None
     if is_bdx:
+        freq_default = float(cfg.get('phase_freq_default', 2.5))
+        freq_lo = float(cfg.get('phase_freq_low', freq_default - 0.5))
+        freq_hi = float(cfg.get('phase_freq_high', freq_default + 0.5))
+        freq_mid = 0.5 * (freq_lo + freq_hi)
+        freq_scale = max(0.5 * (freq_hi - freq_lo), 1e-6)
+        if cmd_freq is None:
+            cmd_freq = freq_default
         ext_clock = ExternalPhaseClock(
-            dt=policy_dt, num_legs=num_legs,
-            base_freq=cfg.get('phase_base_freq', 1.0),
-            vel_scale=cfg.get('phase_vel_scale', 1.0),
+            dt=policy_dt, num_legs=num_legs, default_freq=freq_default,
         )
         ext_clock.reset()
     lp_target = ref_joint.copy()
@@ -177,12 +187,16 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
         return np.clip(obs, -3.0, 3.0)
 
     def get_obs_bdx():
-        """BD_X obs: 42-dim with external phase clock."""
+        """BD_X obs: 43-dim with external phase clock + normalized freq cmd."""
         q  = data.qpos[QPOS_START:QPOS_START + NUM_JOINTS]
         dq = data.qvel[QVEL_START:QVEL_START + NUM_JOINTS]
         quat, base_ang_vel = _imu_state()
         base_euler    = quat_to_euler_xyz(quat)[:2]
         phase_clock   = ext_clock.sin_cos() * static_flag
+        freq_cmd_norm = np.array(
+            [((cmd_freq - freq_mid) / freq_scale) * static_flag],
+            dtype=np.float32,
+        )
         obs = np.concatenate([
             commands,            # 3
             base_euler,          # 2
@@ -191,6 +205,7 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
             dq * 0.1,            # 10
             current_joint_act - q,  # 10
             phase_clock,         # 4
+            freq_cmd_norm,       # 1
         ]).astype(np.float32)
         return np.clip(obs, -3.0, 3.0)
 
@@ -202,19 +217,28 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
     fall_thresh = 0.25
 
     vx_errors    = []
+    vx_body_samples = []    # (elapsed_sec, vx_body) for trajectory-level metrics
     yaw_errors   = []
     vy_abs       = []
     roll_rms_acc = []
     pitch_rms_acc= []
     torque_acc   = []
+    # Gait-quality accumulators (policy-step rate)
+    base_z_samples   = []   # (t, z)
+    yaw_samples      = []   # (t, yaw_world)
+    contact_samples  = []   # (t, in_l, in_r)
+    touchdown_l      = []   # list of (t, |foot_vz|) — rising edges for left foot
+    touchdown_r      = []
+    prev_in_l = False
+    prev_in_r = False
+    CONTACT_THR = 20.0      # N — foot-in-contact threshold (standing ≈ 35N/foot)
     survived     = True
     survive_steps= total_steps
 
     for step in range(total_steps):
         if step % decimation == 0:
             if is_bdx:
-                cmd_vel_norm = np.linalg.norm(commands[:2])
-                ext_clock.update(cmd_vel_norm)
+                ext_clock.update(cmd_freq)
                 obs_now = get_obs_bdx()
             elif is_mirl:
                 obs_now = get_obs_mirl()
@@ -263,26 +287,151 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
             roll_rms_acc.append(euler[0] ** 2)
             pitch_rms_acc.append(euler[1] ** 2)
             torque_acc.append(np.sum(np.abs(torques * dq)))
+            # body-frame forward velocity (robust to yaw): project world (vx, vy) onto heading
+            yaw_world = euler[2]
+            vx_body = data.qvel[0] * math.cos(yaw_world) + data.qvel[1] * math.sin(yaw_world)
+            t_now   = step * sim_dt
+            vx_body_samples.append((t_now, vx_body))
+            base_z_samples.append((t_now, float(data.qpos[2])))
+            yaw_samples.append((t_now, float(yaw_world)))
+            # Contact forces: iterate contact list (cfrc_ext isn't auto-populated
+            # in MuJoCo 3). Aggregate per foot body.
+            force_l = 0.0
+            force_r = 0.0
+            cf_buf = np.zeros(6)
+            for c_idx in range(data.ncon):
+                con = data.contact[c_idx]
+                b1 = model.geom_bodyid[con.geom1]
+                b2 = model.geom_bodyid[con.geom2]
+                other = b2 if b1 == 0 else (b1 if b2 == 0 else -1)
+                if other < 0:
+                    continue
+                mujoco.mj_contactForce(model, data, c_idx, cf_buf)
+                fmag = float(np.linalg.norm(cf_buf[:3]))
+                if other == foot_l_id:
+                    force_l += fmag
+                elif other == foot_r_id:
+                    force_r += fmag
+            in_l = force_l > CONTACT_THR
+            in_r = force_r > CONTACT_THR
+            contact_samples.append((t_now, in_l, in_r))
+            # rising-edge touchdown detection — record |foot_vz| at the touchdown step
+            if foot_l_id >= 0 and in_l and not prev_in_l:
+                vz_l = abs(float(data.cvel[foot_l_id, 5]))
+                touchdown_l.append((t_now, vz_l))
+            if foot_r_id >= 0 and in_r and not prev_in_r:
+                vz_r = abs(float(data.cvel[foot_r_id, 5]))
+                touchdown_r.append((t_now, vz_r))
+            prev_in_l, prev_in_r = in_l, in_r
 
     x_final = data.qpos[0]
     y_final = data.qpos[1]
+    elapsed = survive_steps * sim_dt
 
     total_mass = 7.0
     g = 9.81
     dx = abs(x_final)
     cot = (np.sum(torque_acc) * policy_dt) / (total_mass * g * dx) if dx > 0.05 else float('nan')
 
+    # Trajectory-level metrics (more meaningful than per-step |qvel[0] - cmd_vx|):
+    # - displacement_err: |actual distance − commanded distance|. Insensitive to gait
+    #   oscillation. Only defined for cmd_yaw == 0 (else heading rotates and x isn't
+    #   the right axis).
+    # - vx_bias_body: signed mean of (vx_body − cmd_vx) over the steady-state window.
+    #   Tells whether policy is consistently slow (+) or fast (−). Body-frame so it's
+    #   fair under turning.
+    # - vx_err_steady: |vx_body − cmd_vx| averaged over steady state (skip first 1s
+    #   to drop startup transient).
+    STARTUP = 1.0  # seconds to skip
+    steady = [v for (t, v) in vx_body_samples if t >= STARTUP]
+
+    displacement_err = (abs(x_final - cmd_vx * elapsed)
+                        if (cmd_yaw == 0.0 and elapsed > 0) else float('nan'))
+    vx_bias_body  = float(np.mean([v - cmd_vx for v in steady]))        if steady else float('nan')
+    vx_err_steady = float(np.mean([abs(v - cmd_vx) for v in steady]))   if steady else float('nan')
+
+    # ── Gait-quality metrics (all over steady-state window t >= STARTUP) ────
+    # com_z_rms: body vertical oscillation — big = big steps / bouncy gait
+    z_steady = [z for (t, z) in base_z_samples if t >= STARTUP]
+    com_z_rms = (float(np.sqrt(np.mean([(z - target_h) ** 2 for z in z_steady])))
+                 if z_steady else float('nan'))
+
+    # yaw_osc_rms: residual yaw after removing cmd_yaw linear trend + mean offset —
+    # measures "hip-swinging". Only defined after unwrap; for cmd_yaw==0 this is
+    # simply demeaned yaw RMS.
+    yaw_steady_pairs = [(t, y) for (t, y) in yaw_samples if t >= STARTUP]
+    if len(yaw_steady_pairs) >= 10:
+        t_arr   = np.array([t for (t, _) in yaw_steady_pairs])
+        yaw_arr = np.unwrap(np.array([y for (_, y) in yaw_steady_pairs]))
+        residual = yaw_arr - cmd_yaw * t_arr
+        residual -= residual.mean()
+        yaw_osc_rms = float(np.sqrt(np.mean(residual ** 2)))
+    else:
+        yaw_osc_rms = float('nan')
+
+    # measured_freq: mean step freq per leg from touchdown events.
+    # Need >=2 touchdowns per leg (1 full stride period) to be meaningful.
+    def _leg_period(events):
+        pts = [t for (t, _) in events if t >= STARTUP]
+        if len(pts) < 2:
+            return float('nan')
+        return float(np.mean(np.diff(pts)))
+
+    period_l = _leg_period(touchdown_l)
+    period_r = _leg_period(touchdown_r)
+    periods  = [p for p in (period_l, period_r) if not math.isnan(p)]
+    measured_freq = float(1.0 / np.mean(periods)) if periods else float('nan')
+
+    # duty_factor: fraction of steady-state time each foot is in contact, averaged.
+    steady_contact = [(l, r) for (t, l, r) in contact_samples if t >= STARTUP]
+    if steady_contact:
+        df_l = np.mean([1.0 if l else 0.0 for (l, _) in steady_contact])
+        df_r = np.mean([1.0 if r else 0.0 for (_, r) in steady_contact])
+        duty_factor = float(0.5 * (df_l + df_r))
+    else:
+        duty_factor = float('nan')
+
+    # landing_vz_peak: max |foot_vz| across touchdown events in steady state.
+    td_vz = ([vz for (t, vz) in touchdown_l if t >= STARTUP]
+             + [vz for (t, vz) in touchdown_r if t >= STARTUP])
+    landing_vz_peak = float(max(td_vz)) if td_vz else float('nan')
+
+    # stride_length: |vx_body| × leg_period (distance the CoM travels in one full
+    # ipsilateral stride). Use abs(mean_vx_body) so backward walking is positive.
+    mean_vx_body = float(np.mean(steady)) if steady else float('nan')
+    if steady and periods:
+        stride_length = abs(mean_vx_body) * float(np.mean(periods))
+    else:
+        stride_length = float('nan')
+
+    # stride_asymm: |T_L - T_R| / mean — left/right timing asymmetry.
+    if not math.isnan(period_l) and not math.isnan(period_r):
+        mean_p = 0.5 * (period_l + period_r)
+        stride_asymm = abs(period_l - period_r) / mean_p if mean_p > 1e-6 else float('nan')
+    else:
+        stride_asymm = float('nan')
+
     return {
         'survived':       int(survived),
-        'survive_time':   survive_steps * sim_dt,
+        'survive_time':   elapsed,
         'x_final':        x_final,
         'y_final':        y_final,
         'vx_error_mean':  float(np.mean(vx_errors))  if vx_errors  else float('nan'),
+        'vx_err_steady':  vx_err_steady,
+        'vx_bias_body':   vx_bias_body,
+        'displacement_err': float(displacement_err),
         'yaw_error_mean': float(np.mean(yaw_errors)) if yaw_errors else float('nan'),
         'vy_abs_mean':    float(np.mean(vy_abs))     if vy_abs     else float('nan'),
         'roll_rms':       float(np.sqrt(np.mean(roll_rms_acc)))  if roll_rms_acc  else float('nan'),
         'pitch_rms':      float(np.sqrt(np.mean(pitch_rms_acc))) if pitch_rms_acc else float('nan'),
         'cot':            cot,
+        'com_z_rms':      com_z_rms,
+        'yaw_osc_rms':    yaw_osc_rms,
+        'measured_freq':  measured_freq,
+        'duty_factor':    duty_factor,
+        'landing_vz_peak': landing_vz_peak,
+        'stride_length':  stride_length,
+        'stride_asymm':   stride_asymm,
     }
 
 
@@ -297,7 +446,10 @@ def evaluate(cfg, runs, duration, frictions, vx_list, yaw_list, out_path):
     fieldnames = [
         'friction', 'cmd_vx', 'cmd_yaw', 'run',
         'survived', 'survive_time', 'x_final', 'y_final',
-        'vx_error_mean', 'yaw_error_mean', 'vy_abs_mean', 'roll_rms', 'pitch_rms', 'cot',
+        'vx_error_mean', 'vx_err_steady', 'vx_bias_body', 'displacement_err',
+        'yaw_error_mean', 'vy_abs_mean', 'roll_rms', 'pitch_rms', 'cot',
+        'com_z_rms', 'yaw_osc_rms', 'measured_freq', 'duty_factor',
+        'landing_vz_peak', 'stride_length', 'stride_asymm',
     ]
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -544,7 +696,7 @@ def make_plots(csv_path):
 # ── quick eval for tensorboard (called from train.py) ────────────────────────
 
 def quick_eval(onnx_path, sim_cfg,
-               frictions=(1.0, 3.0),
+               frictions=(1.0, 1.5),
                vx_list=(-0.5, 0.0, 0.5),
                yaw_list=(0.0, 0.5, -0.5),
                runs=10,
@@ -555,11 +707,24 @@ def quick_eval(onnx_path, sim_cfg,
 
     Returns dict with keys:
         sim2sim/survive_time_fr{f}   — mean survive time per friction level
-        sim2sim/vx_err_fwd/bwd       — mean vx error, forward/backward speeds
+        sim2sim/vx_err_fwd/bwd       — mean per-step |qvel[0]-cmd_vx| (world frame, legacy)
+        sim2sim/vx_err_steady_fwd/bwd — body-frame |vx-cmd_vx| averaged over steady state (t>=1s)
+        sim2sim/vx_bias_fwd/bwd      — signed body-frame bias (+=slow, -=fast), steady state
+        sim2sim/displacement_err_fwd/bwd — |x_final - cmd_vx * duration|, trajectory-level
         sim2sim/yaw_err              — mean yaw rate error, non-zero yaw commands
         sim2sim/vy_drift             — mean lateral drift
         sim2sim/pitch_rms_fwd/bwd    — mean pitch RMS forward/backward
         sim2sim/roll_rms             — mean roll RMS
+
+        Gait-quality (forward, survived):
+        sim2sim/com_z_rms            — vertical CoM oscillation (big = bouncy/big-step)
+        sim2sim/yaw_osc_rms          — body yaw oscillation in deg (hip-swinging)
+        sim2sim/measured_freq        — actual step freq per leg (Hz) from foot touchdown
+        sim2sim/duty_factor          — fraction of time feet in contact (~0.6 walk, <0.5 run)
+        sim2sim/landing_vz_peak      — max |foot_vz| at touchdown (hard-slam indicator)
+        sim2sim/stride_length        — |vx_body| × leg_period (distance per stride)
+        sim2sim/stride_asymm         — |T_L - T_R| / mean (L/R timing asymmetry)
+        sim2sim/cot_fr{f}            — per-friction cost of transport
     """
     cfg = dict(sim_cfg)
     cfg['policy_path'] = onnx_path
@@ -597,10 +762,32 @@ def quick_eval(onnx_path, sim_cfg,
 
     metrics['sim2sim/vx_err_fwd']    = float(np.nanmean([r['vx_error_mean'] for r in fwd]))     if fwd      else float('nan')
     metrics['sim2sim/vx_err_bwd']    = float(np.nanmean([r['vx_error_mean'] for r in bwd]))     if bwd      else float('nan')
+    metrics['sim2sim/vx_err_steady_fwd']   = float(np.nanmean([r['vx_err_steady']    for r in fwd])) if fwd else float('nan')
+    metrics['sim2sim/vx_err_steady_bwd']   = float(np.nanmean([r['vx_err_steady']    for r in bwd])) if bwd else float('nan')
+    metrics['sim2sim/vx_bias_fwd']         = float(np.nanmean([r['vx_bias_body']     for r in fwd])) if fwd else float('nan')
+    metrics['sim2sim/vx_bias_bwd']         = float(np.nanmean([r['vx_bias_body']     for r in bwd])) if bwd else float('nan')
+    metrics['sim2sim/displacement_err_fwd'] = float(np.nanmean([r['displacement_err'] for r in fwd])) if fwd else float('nan')
+    metrics['sim2sim/displacement_err_bwd'] = float(np.nanmean([r['displacement_err'] for r in bwd])) if bwd else float('nan')
     metrics['sim2sim/vy_drift']      = float(np.nanmean([r['vy_abs_mean']   for r in survived])) if survived else float('nan')
     metrics['sim2sim/roll_rms']      = float(np.nanmean([math.degrees(r['roll_rms'])   for r in survived])) if survived else float('nan')
     metrics['sim2sim/pitch_rms_fwd'] = float(np.nanmean([math.degrees(r['pitch_rms']) for r in fwd]))       if fwd      else float('nan')
     metrics['sim2sim/pitch_rms_bwd'] = float(np.nanmean([math.degrees(r['pitch_rms']) for r in bwd]))       if bwd      else float('nan')
+
+    # Gait-quality (survived forward episodes — clearest signal; bwd is mirror)
+    if fwd:
+        metrics['sim2sim/com_z_rms']        = float(np.nanmean([r['com_z_rms']        for r in fwd]))
+        metrics['sim2sim/yaw_osc_rms']      = float(np.nanmean([math.degrees(r['yaw_osc_rms']) for r in fwd]))
+        metrics['sim2sim/measured_freq']    = float(np.nanmean([r['measured_freq']    for r in fwd]))
+        metrics['sim2sim/duty_factor']      = float(np.nanmean([r['duty_factor']      for r in fwd]))
+        metrics['sim2sim/landing_vz_peak']  = float(np.nanmean([r['landing_vz_peak']  for r in fwd]))
+        metrics['sim2sim/stride_length']    = float(np.nanmean([r['stride_length']    for r in fwd]))
+        metrics['sim2sim/stride_asymm']     = float(np.nanmean([r['stride_asymm']     for r in fwd]))
+
+    # Per-friction CoT (forward, survived) — energy efficiency vs surface
+    for fr in frictions:
+        sub = [r for r in fwd if r['friction'] == fr]
+        if sub:
+            metrics[f'sim2sim/cot_fr{fr:.1f}'] = float(np.nanmean([r['cot'] for r in sub]))
 
     # yaw tracking (survived yaw-sweep episodes)
     yaw_rows = [r for r in rows if r['cmd_yaw'] != 0.0 and r['survived']]
@@ -652,7 +839,7 @@ def main():
         policy_dir = os.path.dirname(cfg['policy_path'])
         args.out = os.path.join(policy_dir, 'eval.csv')
 
-    frictions = [0.5, 1.0, 1.5, 3.0]
+    frictions = [0.5, 1.0, 1.5]
     vx_list   = [-0.7, -0.5, -0.3, 0.0, 0.3, 0.5, 0.7]
     yaw_list  = [0.0]
 

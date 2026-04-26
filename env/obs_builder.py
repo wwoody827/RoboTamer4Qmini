@@ -145,6 +145,16 @@ def _phase_clock(task):
     return task._ext_clock.sin_cos() * task.static_flag
 
 
+@obs_slot('phase_freq_cmd', dim=1)
+def _phase_freq_cmd(task):
+    """Normalized commanded phase frequency (BD_X style, phase.mode=input).
+
+    Maps cmd_freq ∈ [freq_low, freq_high] → [-1, 1]. Multiplied by static_flag
+    so the signal is zeroed when the robot is standing (same as phase_clock).
+    """
+    return ((task._cmd_freq - task._freq_mid) / task._freq_scale) * task.static_flag
+
+
 @obs_slot('base_lin_vel', dim=3)
 def _base_lin_vel(task):
     """Base linear velocity (privileged — teacher obs only)."""

@@ -52,6 +52,9 @@ class MockTask:
         self._ref_phase_progress = torch.zeros(num_envs, 1, device=device)
         # BD_X external phase clock
         self._ext_clock = MockExtClock(num_envs)
+        self._cmd_freq = torch.full((num_envs, 1), 2.5, device=device)
+        self._freq_mid = 2.5
+        self._freq_scale = 0.5
 
 
 class TestSlotRegistry:
@@ -59,7 +62,8 @@ class TestSlotRegistry:
         expected = [
             'commands_3', 'commands_8', 'base_euler', 'base_ang_vel',
             'joint_pos_err', 'joint_vel', 'joint_tracking_err',
-            'phase_sin_cos', 'phase_freq', 'phase_clock', 'base_lin_vel',
+            'phase_sin_cos', 'phase_freq', 'phase_clock', 'phase_freq_cmd',
+            'base_lin_vel',
             'ref_joint_pos_err', 'ref_joint_vel', 'ref_phase_progress',
         ]
         for name in expected:
@@ -70,7 +74,7 @@ class TestSlotRegistry:
             'commands_3': 3, 'commands_8': 8,
             'base_euler': 2, 'base_ang_vel': 3,
             'joint_pos_err': 10, 'joint_vel': 10, 'joint_tracking_err': 10,
-            'phase_sin_cos': 4, 'phase_freq': 2, 'phase_clock': 4,
+            'phase_sin_cos': 4, 'phase_freq': 2, 'phase_clock': 4, 'phase_freq_cmd': 1,
             'base_lin_vel': 3,
             'ref_joint_pos_err': 10, 'ref_joint_vel': 10, 'ref_phase_progress': 1,
         }
@@ -218,8 +222,8 @@ class TestObsConfigInYaml:
         assert builder.obs_dim == 64
 
     def test_bdx_obs_dim_matches_expected(self):
-        """ObsBuilder dim from bdx.yaml should match expected 42."""
+        """ObsBuilder dim from bdx.yaml should match expected 43 (42 + phase_freq_cmd)."""
         cfg = load_config(os.path.join(os.path.dirname(__file__), '..', 'configs', 'bdx.yaml'))
         task = MockTask()
         builder = ObsBuilder(task, slot_names=cfg.observation.slots)
-        assert builder.obs_dim == 42
+        assert builder.obs_dim == 43

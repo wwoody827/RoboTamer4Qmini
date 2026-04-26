@@ -40,6 +40,25 @@ class BIRLTask(NullTask):
         assert self._foot_mask_mode in ('phase', 'contact'), \
             f"Unknown foot_mask_mode: '{self._foot_mask_mode}'. Must be 'phase' or 'contact'."
 
+        # --- Phase frequency command (phase.mode == 'input' only) ---
+        # Allocated before _resample_commands so the sampler can populate it.
+        if self._phase_mode == 'input':
+            _freq_lo = getattr(_phase_cfg, 'freq_low', 2.0) or 2.0
+            _freq_hi = getattr(_phase_cfg, 'freq_high', 3.0) or 3.0
+            _freq_default = getattr(_phase_cfg, 'freq_default', 0.5 * (_freq_lo + _freq_hi))
+            self._freq_low = float(_freq_lo)
+            self._freq_high = float(_freq_hi)
+            self._freq_default = float(_freq_default)
+            # Normalize [freq_low, freq_high] → [-1, 1] for phase_freq_cmd obs.
+            self._freq_mid = 0.5 * (self._freq_low + self._freq_high)
+            self._freq_scale = max(0.5 * (self._freq_high - self._freq_low), 1e-6)
+            self._cmd_freq = torch.full(
+                (self.num_envs, 1), self._freq_default,
+                dtype=torch.float, device=self.device,
+            )
+        else:
+            self._cmd_freq = None
+
         self.commands = torch.zeros(self.num_envs, self.cfg.command.num_commands, dtype=torch.float, device=self.device,
                                     requires_grad=False)  # x vel, y vel, yaw vel, heading
 
@@ -72,13 +91,12 @@ class BIRLTask(NullTask):
         self.foot_phase = self.phase_modulator.phase
         self.pm_phase = torch.cat((torch.sin(self.foot_phase), torch.cos(self.foot_phase)), 1)
 
-        # External phase clock (BD_X style, phase.mode == 'input')
+        # External phase clock (BD_X style, phase.mode == 'input').
+        # _cmd_freq and freq range are set earlier so _resample_commands can use them.
         if self._phase_mode == 'input':
-            _base_freq = getattr(_phase_cfg, 'base_freq', 1.0) or 1.0
-            _vel_scale = getattr(_phase_cfg, 'vel_scale', 1.0) or 1.0
             self._ext_clock = ExternalPhaseClock(
                 dt=env.dt, num_envs=self.num_envs, num_legs=self.num_legs,
-                device=self.device, base_freq=_base_freq, vel_scale=_vel_scale,
+                device=self.device, default_freq=self._freq_default,
             )
             self._ext_clock.reset(torch.arange(self.num_envs, device=self.device),
                                   render=self.env.render or self.env.debug)
@@ -354,6 +372,13 @@ class BIRLTask(NullTask):
                 yaw_lo, yaw_hi, (n, 1), device=self.device
             ).squeeze(1)
 
+        # Phase frequency command (phase.mode == 'input' only): sample per env.
+        # Training signal: policy must handle any freq in [freq_low, freq_high].
+        if self._cmd_freq is not None:
+            self._cmd_freq[env_ids] = torch_rand_float(
+                self._freq_low, self._freq_high, (n, 1), device=self.device,
+            )
+
         # First 96 envs stand still (curriculum stability)
         if not self.fixed_commands:
             self.commands[:96, [0, 2]] = 0
@@ -477,10 +502,9 @@ class BIRLTask(NullTask):
         if self._use_act_delay and self.env.common_step_counter % 200 == 0:
             self._act_delay_steps = random.randint(*getattr(self.cfg.action, 'actuator_delay_range', [1, 3]))
 
-        # External phase clock: advance from velocity command
+        # External phase clock: advance using per-env commanded frequency
         if self._ext_clock is not None:
-            cmd_vel_norm = torch.norm(self.commands[:, :2], dim=1, keepdim=True)
-            self._ext_clock.update(cmd_vel_norm)
+            self._ext_clock.update(self._cmd_freq)
 
         # Air time accumulation: reset to 0 on ground contact, else += dt.
         actual_in_air = (self.env.foot_frc < 1.0)
