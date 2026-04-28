@@ -430,16 +430,20 @@ class RecoveryTask(NullTask):
 
         # ─── Layer 1: height + orientation (always-on baseline) ────────────
         if LAYER_HEIGHT_ORIENT in self._layers_enabled:
-            # Height: exp(-k * (z - target)^2)
+            # Height: exp(-k * (z - target)^2). Default k=2 gives ~0.7 reward at
+            # z=0m (prone) rising to 1.0 at target — soft enough to provide a
+            # gradient from a fallen start.
             z = self.env.base_pos[:, [2]]
-            height_rew = torch.exp(-30.0 * (z - self._target_height) ** 2)
+            k_h = float(self.rew_weights.get('height_k', 2.0))
+            height_rew = torch.exp(-k_h * (z - self._target_height) ** 2)
 
-            # Orientation: exp(-k * tilt_angle^2). projected_gravity[:, 2] ~ -1 when upright.
+            # Orientation: exp(-k * tilt^2). Default k=0.2 gives ~0.14 reward at
+            # tilt=π (inverted) rising to 1.0 at upright.
             pg_z = self.env.projected_gravity[:, [2]]
-            # cos_tilt in [-1, 1]; want cos_tilt = 1 (upright) → -pg_z = 1
             cos_tilt = (-pg_z).clip(-1., 1.)
             tilt = torch.acos(cos_tilt)  # 0 when upright, pi when fully inverted
-            orient_rew = torch.exp(-2.0 * tilt ** 2)
+            k_o = float(self.rew_weights.get('orientation_k', 0.2))
+            orient_rew = torch.exp(-k_o * tilt ** 2)
 
             w_h = float(self.rew_weights.get('height', 1.0))
             w_o = float(self.rew_weights.get('orientation', 1.0))

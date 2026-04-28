@@ -355,7 +355,8 @@ class CommandInput:
 # MuJoCo scene builder
 # ---------------------------------------------------------------------------
 
-def build_mujoco_model(urdf_path, sim_dt, init_height=0.5, floor_friction=1.0, floor_aniso=False, fix_base=False):
+def build_mujoco_model(urdf_path, sim_dt, init_height=0.5, floor_friction=1.0, floor_aniso=False,
+                       fix_base=False):
     """
     Load robot from URDF via MjSpec, add a floor and actuators, return compiled model.
     Requires MuJoCo >= 3.0.
@@ -363,22 +364,8 @@ def build_mujoco_model(urdf_path, sim_dt, init_height=0.5, floor_friction=1.0, f
     urdf_path = os.path.abspath(urdf_path)
     mesh_dir  = os.path.join(os.path.dirname(os.path.dirname(urdf_path)), 'meshes')
 
-    # base_link has visual but no collision in URDF — patch it in before parsing
-    # so MuJoCo loads the mesh for both physics and rendering
     with open(urdf_path) as f:
         urdf_str = f.read()
-    base_link_collision = (
-        '  <collision>\n'
-        '    <origin xyz="0 0 0" rpy="0 0 0"/>\n'
-        '    <geometry><mesh filename="../meshes/base_link.STL"/></geometry>\n'
-        '  </collision>\n'
-        '</link>'
-    )
-    urdf_str = urdf_str.replace(
-        '  </link>\n\n <!-- IMU -->',
-        base_link_collision + '\n\n <!-- IMU -->',
-        1  # only first occurrence (base_link)
-    )
 
     spec = mujoco.MjSpec()
     spec.discardvisual = False  # keep visual meshes
@@ -436,13 +423,6 @@ def build_mujoco_model(urdf_path, sim_dt, init_height=0.5, floor_friction=1.0, f
     # spec.option is not accessible via Python bindings — set after compilation
     model.opt.timestep = sim_dt
     model.opt.gravity  = np.array([0.0, 0.0, -9.81])
-
-    # Disable collision on base_link mesh (visual only — it would hit the floor)
-    base_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, 'base_link')
-    for i in range(model.ngeom):
-        if model.geom_bodyid[i] == base_body_id and model.geom_type[i] == mujoco.mjtGeom.mjGEOM_MESH:
-            model.geom_contype[i]    = 0
-            model.geom_conaffinity[i] = 0
 
     return model
 

@@ -86,13 +86,17 @@ domain_rand:
   delay_observation: false         # Layer A keeps it simple; turn on later phases
   torque_noise_std: 1.0            # +per-step Nm noise; recovery loads gears hard
 
-# Reward layers gating — Phase A baseline starts with Layer 1 only.
+# Reward layers gating — Phase A baseline: dense shaping (Layer 1) + sparse
+# terminal so the policy gets a gradient AND a clear ±5 success/failure signal.
 reward:
   layers_enabled:
     - layer1_height_orient
-  # Layer 1 weights
+    - terminal
+  # Layer 1 weights + exp sharpness (smaller k = softer / wider gradient).
   height: 1.0
+  height_k: 2.0          # exp(-k * (z - target)^2);  k=2 → ~0.7 at z=0
   orientation: 1.0
+  orientation_k: 0.2     # exp(-k * tilt^2);  k=0.2 → ~0.14 at tilt=pi
   # Layer 2 (gated by layers_enabled)
   stability: 1.0
   # Layer 3 (negative weights = penalties)
@@ -103,5 +107,5 @@ reward:
   # Layer 4
   joint_limit:    1.0
   contact_force:  1.0
-  # Terminal
+  # Terminal: +w if upright at episode end, -w otherwise.
   terminal:       5.0

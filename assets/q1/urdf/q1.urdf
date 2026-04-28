@@ -41,6 +41,12 @@
       </geometry>
       <material name="light_blue"/>
     </visual>
+    <collision>
+      <origin xyz="0 0 0.05" rpy="0 0 0" />
+      <geometry>
+        <box size="0.32 0.22 0.12" />
+      </geometry>
+    </collision>
   </link>
 
  <!-- IMU -->
