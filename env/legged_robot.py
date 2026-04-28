@@ -162,6 +162,10 @@ class LeggedRobotEnv:
         self.torques = self._compute_torques(joint_actions).to(self.device)
         if self.cfg.domain_rand.randomize_torque:
             self.torques *= self.tau_gains
+        tau_noise_std = float(getattr(self.cfg.domain_rand, 'torque_noise_std', 0.0) or 0.0)
+        if tau_noise_std > 0.0:
+            self.torques = self.torques + tau_noise_std * torch.randn_like(self.torques)
+        if self.cfg.domain_rand.randomize_torque or tau_noise_std > 0.0:
             self.torques = torch.clip(self.torques, -self.torque_limits, self.torque_limits)
         self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(self.torques))
         self.gym.simulate(self.sim)

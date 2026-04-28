@@ -70,6 +70,16 @@ def build_manifest(params):
         'urdf_path': asset_cfg.get('file', 'assets/q1/urdf/q1.urdf'),
         'init_height': 0.5,
     }
+
+    # Recovery-task-specific section (consumed by high-level controller in deploy).
+    if manifest['task_type'] == 'Recovery':
+        manifest['recovery'] = {
+            'target_height': float(task_cfg.get('target_height', 0.45)),
+            'target_height_ratio': float(task_cfg.get('target_height_ratio', 0.85)),
+            'success_tilt_deg': float(task_cfg.get('success_tilt_deg', 25.0)),
+            'episode_length_s': float(params.get('runner', {}).get('episode_length_s', 5.0)),
+        }
+
     return manifest
 
 

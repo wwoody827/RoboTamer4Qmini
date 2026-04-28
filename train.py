@@ -269,6 +269,24 @@ def train():
             for name, val in zip(joint_names, torque_mean):
                 writer.add_scalar(f'6:Torque/{name}', val, it)
 
+        # Recovery / curriculum scalars from task.info() (last-step snapshot).
+        if isinstance(info, dict):
+            for k, v in info.items():
+                if not (k.startswith('curriculum/') or k.startswith('recovery')):
+                    continue
+                if torch.is_tensor(v):
+                    if v.numel() != 1:
+                        continue
+                    v = float(v.item())
+                else:
+                    try:
+                        v = float(v)
+                    except (TypeError, ValueError):
+                        continue
+                if v != v:  # nan
+                    continue
+                writer.add_scalar(f'7:{k}', v, it)
+
         print(f"{exp_name}#{it}:",
               f"{'t'} {total_time / 60:.1f}m({iteration_time:.1f}s)",
               f"col {collection_time:.2f}s",

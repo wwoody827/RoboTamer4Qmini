@@ -126,6 +126,7 @@ domain_rand:
   added_damping_range: [0.8, 1.2]
   randomize_torque: true
   torque_range: [0.8, 1.2]
+  torque_noise_std: 0.0           # additive Nm noise per step (0 disables)
   randomize_gains: true
   gains_range: [0.8, 1.2]
   push_robots: true
