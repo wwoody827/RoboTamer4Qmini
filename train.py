@@ -232,7 +232,8 @@ def train():
                           f'success={_metrics.get("sim2sim/recovery_success_rate", float("nan")):.2%}  '
                           f'mean_z={_metrics.get("sim2sim/recovery_mean_final_z", float("nan")):.3f}m  '
                           f'tilt={_metrics.get("sim2sim/recovery_mean_final_tilt_deg", float("nan")):.1f}°  '
-                          f'τpeak={_metrics.get("sim2sim/recovery_mean_peak_tau_nm", float("nan")):.1f}Nm  '
+                          f'τpeak/eff={_metrics.get("sim2sim/recovery_mean_peak_tau_ratio", float("nan")):.2f}×'
+                          f'(max {_metrics.get("sim2sim/recovery_max_peak_tau_ratio", float("nan")):.2f}×)  '
                           f'τavg={_metrics.get("sim2sim/recovery_mean_abs_tau_nm", float("nan")):.1f}Nm  '
                           f'({_elapsed:.0f}s)')
                 else:

@@ -103,9 +103,14 @@ def run_recovery_episode(model, data, session, input_name, cfg, init_state, seed
     tilt_log = np.zeros(n_policy_steps + 1, dtype=np.float32)
     upright_log = np.zeros(n_policy_steps + 1, dtype=bool)
     # Torque tracking for sim2real diagnostics:
-    #   peak_tau   = max |τ_i| seen on any joint over the whole episode
+    #   peak_tau     = max |τ_i| seen on any joint, in Nm (raw commanded)
+    #   peak_ratio   = max |τ_i| / effort_i — most useful number: >1 means policy
+    #                  is requesting more than the motor can deliver, sim is
+    #                  silently clipping for it, and real robot will saturate.
     #   sum_abs_tau, n_tau_samples → mean across all (joint, sim_step) samples
+    effort_limits = np.abs(model.actuator_forcerange[:10, 1]).astype(np.float32)
     peak_tau = 0.0
+    peak_ratio = 0.0
     sum_abs_tau = 0.0
     n_tau_samples = 0
     success_z = target_z * target_ratio
@@ -152,6 +157,7 @@ def run_recovery_episode(model, data, session, input_name, cfg, init_state, seed
             mujoco.mj_step(model, data)
             abs_tau = np.abs(tau)
             peak_tau = max(peak_tau, float(abs_tau.max()))
+            peak_ratio = max(peak_ratio, float((abs_tau / effort_limits).max()))
             sum_abs_tau += float(abs_tau.sum())
             n_tau_samples += abs_tau.size
 
@@ -175,6 +181,7 @@ def run_recovery_episode(model, data, session, input_name, cfg, init_state, seed
         'final_tilt_deg': float(tilt_log[final_idx]),
         'time_to_upright_s': time_to_upright,
         'peak_tau_nm': peak_tau,
+        'peak_tau_ratio': peak_ratio,
         'mean_abs_tau_nm': mean_abs_tau,
         'pose_label': str(init_state.get('pose_label', '?')),
     }
@@ -246,8 +253,10 @@ def quick_eval_recovery(onnx_path, sim_cfg, manifest=None, runs=30, init_pool_pa
     mean_tilt = float(np.mean([r['final_tilt_deg'] for r in results]))
     ttus = [r['time_to_upright_s'] for r in results if r['ever_upright']]
     mean_ttu = float(np.mean(ttus)) if ttus else float('nan')
-    mean_peak_tau = float(np.mean([r['peak_tau_nm'] for r in results]))
-    mean_avg_tau  = float(np.mean([r['mean_abs_tau_nm'] for r in results]))
+    mean_peak_tau   = float(np.mean([r['peak_tau_nm']    for r in results]))
+    mean_avg_tau    = float(np.mean([r['mean_abs_tau_nm'] for r in results]))
+    mean_peak_ratio = float(np.mean([r['peak_tau_ratio'] for r in results]))
+    max_peak_ratio  = float(np.max ([r['peak_tau_ratio'] for r in results]))
 
     return {
         'sim2sim/recovery_success_rate': succ_rate,
@@ -255,8 +264,10 @@ def quick_eval_recovery(onnx_path, sim_cfg, manifest=None, runs=30, init_pool_pa
         'sim2sim/recovery_mean_final_z': mean_z,
         'sim2sim/recovery_mean_final_tilt_deg': mean_tilt,
         'sim2sim/recovery_mean_time_to_upright_s': mean_ttu,
-        'sim2sim/recovery_mean_peak_tau_nm': mean_peak_tau,
-        'sim2sim/recovery_mean_abs_tau_nm':  mean_avg_tau,
+        'sim2sim/recovery_mean_peak_tau_nm':    mean_peak_tau,
+        'sim2sim/recovery_mean_abs_tau_nm':     mean_avg_tau,
+        'sim2sim/recovery_mean_peak_tau_ratio': mean_peak_ratio,
+        'sim2sim/recovery_max_peak_tau_ratio':  max_peak_ratio,
     }
 
 
@@ -351,9 +362,11 @@ def main():
     mean_tilt = float(np.mean([r['final_tilt_deg'] for r in results]))
     ttus = [r['time_to_upright_s'] for r in results if r['ever_upright']]
     mean_ttu = float(np.mean(ttus)) if ttus else float('nan')
-    mean_peak_tau = float(np.mean([r['peak_tau_nm'] for r in results]))
-    max_peak_tau  = float(np.max([r['peak_tau_nm'] for r in results]))
-    mean_avg_tau  = float(np.mean([r['mean_abs_tau_nm'] for r in results]))
+    mean_peak_tau   = float(np.mean([r['peak_tau_nm'] for r in results]))
+    max_peak_tau    = float(np.max ([r['peak_tau_nm'] for r in results]))
+    mean_avg_tau    = float(np.mean([r['mean_abs_tau_nm'] for r in results]))
+    mean_peak_ratio = float(np.mean([r['peak_tau_ratio'] for r in results]))
+    max_peak_ratio  = float(np.max ([r['peak_tau_ratio'] for r in results]))
 
     print()
     print('=== Recovery sim2sim results ===')
@@ -365,6 +378,9 @@ def main():
     print(f'  mean_time_to_upright  : {mean_ttu:.2f} s  (over {len(ttus)} ever-upright runs)')
     print(f'  mean peak |τ|         : {mean_peak_tau:.1f} Nm   (worst-run peak: {max_peak_tau:.1f} Nm)')
     print(f'  mean avg  |τ|         : {mean_avg_tau:.1f} Nm')
+    print(f'  mean peak |τ|/effort  : {mean_peak_ratio:.2f}×   (worst-run: {max_peak_ratio:.2f}×)')
+    print(f'    >1.0 means policy is requesting more than the motor can deliver,')
+    print(f'    sim is silently clipping for it, real robot will saturate.')
 
     if args.by_label:
         from collections import defaultdict
