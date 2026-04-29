@@ -102,6 +102,12 @@ def run_recovery_episode(model, data, session, input_name, cfg, init_state, seed
     z_log = np.zeros(n_policy_steps + 1, dtype=np.float32)
     tilt_log = np.zeros(n_policy_steps + 1, dtype=np.float32)
     upright_log = np.zeros(n_policy_steps + 1, dtype=bool)
+    # Torque tracking for sim2real diagnostics:
+    #   peak_tau   = max |τ_i| seen on any joint over the whole episode
+    #   sum_abs_tau, n_tau_samples → mean across all (joint, sim_step) samples
+    peak_tau = 0.0
+    sum_abs_tau = 0.0
+    n_tau_samples = 0
     success_z = target_z * target_ratio
     success_tilt_rad = np.deg2rad(tilt_deg)
 
@@ -144,6 +150,10 @@ def run_recovery_episode(model, data, session, input_name, cfg, init_state, seed
             tau = kps * (current_joint_act - q) - kds * qd
             data.ctrl[:10] = tau
             mujoco.mj_step(model, data)
+            abs_tau = np.abs(tau)
+            peak_tau = max(peak_tau, float(abs_tau.max()))
+            sum_abs_tau += float(abs_tau.sum())
+            n_tau_samples += abs_tau.size
 
         _measure(t + 1)
 
@@ -157,12 +167,15 @@ def run_recovery_episode(model, data, session, input_name, cfg, init_state, seed
     else:
         time_to_upright = float('nan')
 
+    mean_abs_tau = sum_abs_tau / max(n_tau_samples, 1)
     return {
         'success': success,
         'ever_upright': ever_upright,
         'final_z': float(z_log[final_idx]),
         'final_tilt_deg': float(tilt_log[final_idx]),
         'time_to_upright_s': time_to_upright,
+        'peak_tau_nm': peak_tau,
+        'mean_abs_tau_nm': mean_abs_tau,
         'pose_label': str(init_state.get('pose_label', '?')),
     }
 
@@ -233,6 +246,8 @@ def quick_eval_recovery(onnx_path, sim_cfg, manifest=None, runs=30, init_pool_pa
     mean_tilt = float(np.mean([r['final_tilt_deg'] for r in results]))
     ttus = [r['time_to_upright_s'] for r in results if r['ever_upright']]
     mean_ttu = float(np.mean(ttus)) if ttus else float('nan')
+    mean_peak_tau = float(np.mean([r['peak_tau_nm'] for r in results]))
+    mean_avg_tau  = float(np.mean([r['mean_abs_tau_nm'] for r in results]))
 
     return {
         'sim2sim/recovery_success_rate': succ_rate,
@@ -240,6 +255,8 @@ def quick_eval_recovery(onnx_path, sim_cfg, manifest=None, runs=30, init_pool_pa
         'sim2sim/recovery_mean_final_z': mean_z,
         'sim2sim/recovery_mean_final_tilt_deg': mean_tilt,
         'sim2sim/recovery_mean_time_to_upright_s': mean_ttu,
+        'sim2sim/recovery_mean_peak_tau_nm': mean_peak_tau,
+        'sim2sim/recovery_mean_abs_tau_nm':  mean_avg_tau,
     }
 
 
@@ -334,6 +351,9 @@ def main():
     mean_tilt = float(np.mean([r['final_tilt_deg'] for r in results]))
     ttus = [r['time_to_upright_s'] for r in results if r['ever_upright']]
     mean_ttu = float(np.mean(ttus)) if ttus else float('nan')
+    mean_peak_tau = float(np.mean([r['peak_tau_nm'] for r in results]))
+    max_peak_tau  = float(np.max([r['peak_tau_nm'] for r in results]))
+    mean_avg_tau  = float(np.mean([r['mean_abs_tau_nm'] for r in results]))
 
     print()
     print('=== Recovery sim2sim results ===')
@@ -343,6 +363,8 @@ def main():
     print(f'  mean_final_z          : {mean_z:.3f} m  (success threshold {cfg["target_height"]*cfg["target_height_ratio"]:.3f})')
     print(f'  mean_final_tilt       : {mean_tilt:.1f}° (success threshold {cfg["success_tilt_deg"]:.1f})')
     print(f'  mean_time_to_upright  : {mean_ttu:.2f} s  (over {len(ttus)} ever-upright runs)')
+    print(f'  mean peak |τ|         : {mean_peak_tau:.1f} Nm   (worst-run peak: {max_peak_tau:.1f} Nm)')
+    print(f'  mean avg  |τ|         : {mean_avg_tau:.1f} Nm')
 
     if args.by_label:
         from collections import defaultdict

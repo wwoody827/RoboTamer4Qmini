@@ -1,0 +1,33 @@
+# Recovery v2d — sim2real torque safety pass on top of v2c.
+#
+# Why: v2c policy works in sim but uses peak torques (kip-up etc.) that the
+# real robot can't reliably deliver — and even if it could, repeated peak ops
+# damage gears. v2d makes the policy assume weaker motors and penalizes
+# topping out the gearbox.
+#
+# Three changes vs v2c:
+#   (1) re-enable Layer 3 (smoothness/torque); bump torque + joint_vel weights
+#   (2) torque saturation penalty: |τ| - 0.8·τ_max, threshold-style (not L2),
+#       so policy uses motors freely up to 80% but pays sharply above that
+#   (3) DR torque_range biased *downward* [0.7, 1.0] — policy must work even
+#       when real motors deliver only 70% of URDF effort
+_base: recovery_v2c.yaml
+
+domain_rand:
+  # Was [0.8, 1.2] (default). Removing the >1.0 tail forces the policy to
+  # cope with weaker-than-nominal motors, which is the actual sim2real risk.
+  torque_range: [0.7, 1.0]
+
+reward:
+  layers_enabled:
+    - layer1b_phase_shaped
+    - layer3_smoothness     # was disabled in v2/v2c
+    - terminal
+  # Tighter Layer 3 weights:
+  action_rate:        -0.02     # ×2 vs default
+  action_jerk:        -0.005    # unchanged
+  joint_vel_pen:      -0.001    # ×2 — main lever to suppress kip-up sweeps
+  torque_pen:         -0.0005   # ×5 vs default (still small; just a regularizer)
+  # Saturation penalty (the BIRL-style sharp barrier):
+  torque_sat_pen:     -0.01     # weight × Σ max(0, |τ|·1 - 0.8·τ_max)
+  torque_sat_thresh:   0.8      # 80% of URDF effort = "safe" zone
