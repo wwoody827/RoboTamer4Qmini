@@ -1,0 +1,11 @@
+# Recovery v2c — same as v2 but terminal reward uses ref_joint_pos pose match
+# instead of binary success. Targets the "deep squat sink" observed in v2b
+# (z=0.36, tilt=11°, but knees over-flexed by 0.7-0.9 rad).
+#   terminal: success_bonus = is_upright * exp(-k_jp * ||jp - ref_jp||²) * terminal_step
+#             failure_pen   = -1 if not upright at terminal
+# Effect: a squatted-but-upright pose loses ~70% of the success bonus, gradient
+# pushes toward extended legs (matching ref_joint_pos).
+_base: recovery_v2.yaml
+
+reward:
+  terminal_pose_k: 1.0    # exp(-k * ||jp - ref_jp||²); k=1 gives ~0.27 reward at squat

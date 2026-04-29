@@ -90,11 +90,16 @@ def train():
         if _sim2sim_dir not in _sys.path:
             _sys.path.insert(0, _sim2sim_dir)
         from sim2sim import manifest_to_sim2sim_cfg
-        from evaluate import quick_eval as _quick_eval
         # Build manifest from training config — no separate YAML files needed
         _manifest = build_manifest(cfg_dict)
         sim2sim_cfg = manifest_to_sim2sim_cfg(_manifest, policy_path='<will be set per eval>')
-        print(f'[sim2sim] eval enabled every {sim2sim_interval} iters (manifest-based)')
+        # Recovery uses a different eval harness (no commands, fallen-pose init pool)
+        if _manifest.get('task_type') == 'Recovery':
+            from sim2sim_recovery import quick_eval_recovery as _quick_eval
+            print(f'[sim2sim] recovery eval enabled every {sim2sim_interval} iters (manifest-based)')
+        else:
+            from evaluate import quick_eval as _quick_eval
+            print(f'[sim2sim] eval enabled every {sim2sim_interval} iters (manifest-based)')
     # ─────────────────────────────────────────────────────────────────────────
 
     actor = load_actor(cfg_dict['policy'], device).train()
@@ -214,19 +219,29 @@ def train():
                 # Save manifest alongside ONNX
                 save_manifest(_manifest, os.path.join(_deploy_dir, f'policy_{it}_manifest.yaml'))
                 sim2sim_cfg['policy_path'] = _onnx_path
-                _metrics = _quick_eval(_onnx_path, sim2sim_cfg)
+                if _manifest.get('task_type') == 'Recovery':
+                    _metrics = _quick_eval(_onnx_path, sim2sim_cfg, manifest=_manifest)
+                else:
+                    _metrics = _quick_eval(_onnx_path, sim2sim_cfg)
                 for k, v in _metrics.items():
                     if not (isinstance(v, float) and (v != v)):  # skip nan
                         writer.add_scalar(f'5:{k}', v, it)
                 _elapsed = time.time() - _t0
-                _surv_str = '  '.join(
-                    f'fr{k.split("fr")[1]}={v:.1f}s' for k, v in _metrics.items()
-                    if 'survive_time' in k
-                )
-                print(f'[sim2sim@{it}] {_surv_str}  '
-                      f'vx_err fwd={_metrics.get("sim2sim/vx_err_fwd", float("nan")):.3f} '
-                      f'bwd={_metrics.get("sim2sim/vx_err_bwd", float("nan")):.3f}  '
-                      f'({_elapsed:.0f}s)')
+                if _manifest.get('task_type') == 'Recovery':
+                    print(f'[sim2sim@{it}] '
+                          f'success={_metrics.get("sim2sim/recovery_success_rate", float("nan")):.2%}  '
+                          f'mean_z={_metrics.get("sim2sim/recovery_mean_final_z", float("nan")):.3f}m  '
+                          f'tilt={_metrics.get("sim2sim/recovery_mean_final_tilt_deg", float("nan")):.1f}°  '
+                          f'({_elapsed:.0f}s)')
+                else:
+                    _surv_str = '  '.join(
+                        f'fr{k.split("fr")[1]}={v:.1f}s' for k, v in _metrics.items()
+                        if 'survive_time' in k
+                    )
+                    print(f'[sim2sim@{it}] {_surv_str}  '
+                          f'vx_err fwd={_metrics.get("sim2sim/vx_err_fwd", float("nan")):.3f} '
+                          f'bwd={_metrics.get("sim2sim/vx_err_bwd", float("nan")):.3f}  '
+                          f'({_elapsed:.0f}s)')
             except Exception as _e:
                 print(f'[sim2sim] eval failed at iter {it}: {_e}')
         # ─────────────────────────────────────────────────────────────────────

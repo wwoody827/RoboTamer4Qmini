@@ -1,0 +1,25 @@
+# Recovery v2 — same architecture as v1, with three changes:
+#   (4) entropy_coef 0.001 → 0.003 (3× v1; v2's 0.01 blew up noise_std 0.8→6.0)
+#   (1) phase-conditioned reward layer (early=orient, late=height) — BDX-style episodic
+#   (2) foot-contact bonus in late phase (both feet planted in last 30%)
+_base: recovery.yaml
+
+algorithm:
+  entropy_coef: 0.003
+
+reward:
+  layers_enabled:
+    - layer1b_phase_shaped
+    - terminal
+  # Phase-shaped weights (linear interpolation over episode_progress):
+  orient_w_early: 2.0           # turn-over emphasis early
+  orient_w_late:  0.5
+  height_w_early: 0.5
+  height_w_late:  2.0           # stand-up emphasis late
+  # exp sharpness inherited from base recovery.yaml (height_k=2.0, orientation_k=0.2)
+  # Foot contact:
+  foot_contact:               1.0
+  foot_contact_force_thresh:  5.0
+  foot_phase_gate:            0.7   # active only for p > 0.7
+  # Terminal still ±5
+  terminal:                   5.0

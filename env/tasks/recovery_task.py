@@ -59,11 +59,12 @@ def _joint_pos_abs(task):
 # ─── RecoveryTask ───────────────────────────────────────────────────────────
 
 # Reward layer keys (for cfg.reward.layers_enabled):
-LAYER_HEIGHT_ORIENT = 'layer1_height_orient'
-LAYER_STABILITY    = 'layer2_stability'
-LAYER_SMOOTHNESS   = 'layer3_smoothness'
-LAYER_SAFETY       = 'layer4_safety'
-LAYER_TERMINAL     = 'terminal'
+LAYER_HEIGHT_ORIENT       = 'layer1_height_orient'
+LAYER_PHASE_SHAPED        = 'layer1b_phase_shaped'
+LAYER_STABILITY           = 'layer2_stability'
+LAYER_SMOOTHNESS          = 'layer3_smoothness'
+LAYER_SAFETY              = 'layer4_safety'
+LAYER_TERMINAL            = 'terminal'
 
 
 @register
@@ -450,6 +451,49 @@ class RecoveryTask(NullTask):
             components += [w_h * height_rew, w_o * orient_rew]
             names += ['height', 'orientation']
 
+        # ─── Layer 1b: phase-conditioned shaping (BD_X-inspired episodic) ──
+        # Reward profile changes over the episode using episode_progress p∈[0,1]:
+        #   early (p→0): orient_w high, height_w low → "get torso upright first"
+        #   late  (p→1): orient_w low,  height_w high → "stand at target height"
+        #   foot_contact bonus only kicks in for p > foot_phase_gate
+        # All three terms are exp-shaped on the same physical signals as Layer 1.
+        if LAYER_PHASE_SHAPED in self._layers_enabled:
+            p = (self.env.episode_length_buf.float()
+                 / max(self.env.max_episode_length, 1)).unsqueeze(-1)
+
+            z = self.env.base_pos[:, [2]]
+            k_h = float(self.rew_weights.get('height_k', 2.0))
+            height_rew_b = torch.exp(-k_h * (z - self._target_height) ** 2)
+
+            pg_z = self.env.projected_gravity[:, [2]]
+            cos_tilt = (-pg_z).clip(-1., 1.)
+            tilt = torch.acos(cos_tilt)
+            k_o = float(self.rew_weights.get('orientation_k', 0.2))
+            orient_rew_b = torch.exp(-k_o * tilt ** 2)
+
+            # Linear schedule: weight slides between early and late values.
+            o_early = float(self.rew_weights.get('orient_w_early', 2.0))
+            o_late  = float(self.rew_weights.get('orient_w_late',  0.5))
+            h_early = float(self.rew_weights.get('height_w_early', 0.5))
+            h_late  = float(self.rew_weights.get('height_w_late',  2.0))
+            orient_w = o_early + (o_late - o_early) * p
+            height_w = h_early + (h_late - h_early) * p
+
+            # Foot contact bonus: both feet in contact, only in late phase.
+            foot_thresh = float(self.rew_weights.get('foot_contact_force_thresh', 5.0))
+            both_feet = (self.env.foot_frc > foot_thresh).all(dim=1, keepdim=True).float()
+            gate = float(self.rew_weights.get('foot_phase_gate', 0.7))
+            late_mask = (p > gate).float()
+            foot_w = float(self.rew_weights.get('foot_contact', 1.0))
+            foot_rew = both_feet * late_mask
+
+            components += [
+                orient_w * orient_rew_b,
+                height_w * height_rew_b,
+                foot_w * foot_rew,
+            ]
+            names += ['orient_phased', 'height_phased', 'foot_contact_late']
+
         # ─── Layer 2: stability bonus (gated on is_upright) ────────────────
         if LAYER_STABILITY in self._layers_enabled:
             base_lin_v = torch.norm(self.env.base_lin_vel, dim=1, keepdim=True)
@@ -502,9 +546,16 @@ class RecoveryTask(NullTask):
             names += ['joint_limit', 'contact_force']
 
         # ─── Terminal reward (applied only on the last step of episode) ───
+        # Continuous pose match against ref_joint_pos: penalizes "upright but
+        # squatting" sinks where height/tilt are partially satisfied without
+        # leg extension.
         if LAYER_TERMINAL in self._layers_enabled:
             terminal = (self.env.episode_length_buf >= self.env.max_episode_length - 1).unsqueeze(-1).float()
-            success_bonus = is_upright * terminal
+            ref_jp = self.ref_joint_action
+            jp_err = torch.sum((self.env.joint_pos - ref_jp) ** 2, dim=1, keepdim=True)
+            k_jp = float(self.rew_weights.get('terminal_pose_k', 1.0))
+            pose_match = torch.exp(-k_jp * jp_err)  # ∈ (0, 1], 1 when matching ref
+            success_bonus = is_upright * pose_match * terminal
             failure_pen = (1.0 - is_upright) * terminal * (-1.0)
             w_t = float(self.rew_weights.get('terminal', 5.0))
             components.append(w_t * (success_bonus + failure_pen))
