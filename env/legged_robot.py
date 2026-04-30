@@ -403,6 +403,14 @@ class LeggedRobotEnv:
                 self.dof_pos_limits[i, 1] = props["upper"][i].item()
                 self.dof_vel_limits[i] = props["velocity"][i].item()
                 self.torque_limits[i] = props["effort"][i].item()
+            # Hard sim2real safety scale: shrink torque_limits below URDF effort
+            # so the policy is forced to learn solutions that work without
+            # peak motor capacity. Set in cfg.domain_rand.torque_limit_scale.
+            tl_scale = float(getattr(self.cfg.domain_rand, 'torque_limit_scale', 1.0) or 1.0)
+            if abs(tl_scale - 1.0) > 1e-6:
+                self.torque_limits *= tl_scale
+                print(f'[legged_robot] torque_limits scaled ×{tl_scale}: '
+                      f'{self.torque_limits.cpu().numpy().tolist()}')
         return props
 
     def _compute_torques(self, joint_action):

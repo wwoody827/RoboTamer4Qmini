@@ -1,0 +1,30 @@
+# Recovery v2e — diagnostic experiment: aggressive sat penalty only.
+#
+# Why: v2d (sat penalty + DR change [0.7,1.0]) failed — 5000 iter and τpeak
+# basically didn't move (139→137 Nm), success rate crashed to 10-30%.
+# Hypothesis: changing two things at once + DR re-adaptation overwhelmed the
+# 5000 iter budget.
+#
+# v2e isolates the sat penalty: keep v2c's torque DR [0.8, 1.2], but make
+# the sat penalty much sharper. Threshold drops 0.8→0.5 (penalize anything
+# above 50% of effort, not 80%) and weight ×5. Layer 3 active.
+#
+# This is a 1-2k iter probe, not a full run. Read the τpeak/eff ratio:
+#   - drops to <3× while success holds >80% → strategy works, continue training
+#   - success crashes < 50%, ratio doesn't budge → v2c policy is fundamentally
+#     "torque-addicted" and we need to retrain from scratch with a curriculum
+#     on torque_sat_thresh (start lenient, tighten over training).
+_base: recovery_v2c.yaml
+
+reward:
+  layers_enabled:
+    - layer1b_phase_shaped
+    - layer3_smoothness
+    - terminal
+  # Sharper Layer 3:
+  action_rate:        -0.02
+  joint_vel_pen:      -0.001    # ×2 vs default
+  torque_pen:         -0.001    # ×10 vs default (still small regularizer)
+  # Saturation penalty — the main lever:
+  torque_sat_pen:     -0.05     # ×5 vs v2d
+  torque_sat_thresh:   0.5      # 0.8→0.5: penalize anything above 50% effort

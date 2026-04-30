@@ -514,28 +514,38 @@ class RecoveryTask(NullTask):
             act_jerk = torch.sum((a_now - 2 * a_prev + a_pp) ** 2, dim=1, keepdim=True)
             joint_v = torch.sum(self.env.joint_vel ** 2, dim=1, keepdim=True)
             torque_pen = torch.sum(self.env.react_tau ** 2, dim=1, keepdim=True)
-            # Saturation penalty: only counts force above sat_thresh × torque_limit.
-            # Lets the policy use 80% of the motor freely but discourages topping out
-            # the gearbox (which is what damages real hardware and what sim
-            # over-confidently lets policy do for free).
+            # Hard threshold saturation penalty: only counts force above
+            # sat_thresh × torque_limit. Sharp barrier — gradient only fires
+            # above the threshold; policy gets nothing for staying below it.
             sat_thresh = float(self.rew_weights.get('torque_sat_thresh', 0.8))
             over = (torch.abs(self.env.react_tau)
                     - sat_thresh * self.env.torque_limits).clip(min=0.)
             torque_sat = torch.sum(over, dim=1, keepdim=True)
+            # Soft normalized-squared penalty: Σ (|τ_i| / τ_max_i)². Always
+            # provides gradient (no threshold), dimensionless across joints
+            # with different effort limits. Use this when training from
+            # scratch — the hard barrier is for breaking already-trained
+            # policies out of "torque-addicted" local optima, but lacks the
+            # smooth signal needed to shape a fresh policy.
+            tau_norm = self.env.react_tau / self.env.torque_limits.unsqueeze(0)
+            torque_norm_sq = torch.sum(tau_norm ** 2, dim=1, keepdim=True)
 
-            w_rate   = float(self.rew_weights.get('action_rate',    -0.01))
-            w_jerk   = float(self.rew_weights.get('action_jerk',    -0.005))
-            w_jvel   = float(self.rew_weights.get('joint_vel_pen',  -0.0005))
-            w_torque = float(self.rew_weights.get('torque_pen',     -0.0001))
-            w_sat    = float(self.rew_weights.get('torque_sat_pen', -0.01))
+            w_rate    = float(self.rew_weights.get('action_rate',     -0.01))
+            w_jerk    = float(self.rew_weights.get('action_jerk',     -0.005))
+            w_jvel    = float(self.rew_weights.get('joint_vel_pen',   -0.0005))
+            w_torque  = float(self.rew_weights.get('torque_pen',      -0.0001))
+            w_sat     = float(self.rew_weights.get('torque_sat_pen',  -0.01))
+            w_normsq  = float(self.rew_weights.get('torque_norm_sq_pen', 0.0))
             components += [
-                w_rate   * act_rate,
-                w_jerk   * act_jerk,
-                w_jvel   * joint_v,
-                w_torque * torque_pen,
-                w_sat    * torque_sat,
+                w_rate    * act_rate,
+                w_jerk    * act_jerk,
+                w_jvel    * joint_v,
+                w_torque  * torque_pen,
+                w_sat     * torque_sat,
+                w_normsq  * torque_norm_sq,
             ]
-            names += ['action_rate', 'action_jerk', 'joint_vel_pen', 'torque_pen', 'torque_sat']
+            names += ['action_rate', 'action_jerk', 'joint_vel_pen',
+                      'torque_pen', 'torque_sat', 'torque_norm_sq']
 
         # ─── Layer 4: safety ──────────────────────────────────────────────
         if LAYER_SAFETY in self._layers_enabled:

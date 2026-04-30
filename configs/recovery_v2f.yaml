@@ -1,0 +1,35 @@
+# Recovery v2f — hard torque limit clip (0.6× URDF effort).
+#
+# Lessons from v2d/v2e:
+#   - v2c policy is "torque-addicted": its solution requires 6× motor
+#     capacity, only works because Isaac Gym silently clips for it.
+#   - Reward shaping (sat penalty) can't pull the ratio down — too
+#     gradient-incompatible with the v2c local optimum.
+#
+# v2f: skip reward shaping, go direct. Hard-clip torque_limits to 0.6× URDF
+# effort during training (effort 20→12, 60→36 Nm). Sim physics clips at
+# this lower limit, so when policy commands 124 Nm, only 12 actually
+# applies to the joint — policy is forced to find solutions within this
+# envelope or fail.
+#
+# Why 0.6 not 0.5: v2c's mean τavg is ~10 Nm, peak 124 Nm. Going to 0.5×
+# (10 Nm clip) might be too aggressive and break basic dynamics. 0.6
+# (12 Nm) leaves a tiny margin; if v2f works, follow up with 0.5 / 0.4.
+#
+# Other settings same as v2c (torque DR [0.8,1.2], no sat penalty — the
+# hard clip is the constraint, no need to also reward-shape).
+_base: recovery_v2c.yaml
+
+domain_rand:
+  torque_limit_scale: 0.6   # ×URDF effort. 1.0 = unchanged.
+  # torque_range stays [0.8, 1.2] — change one thing at a time
+
+reward:
+  layers_enabled:
+    - layer1b_phase_shaped
+    - layer3_smoothness     # light regularizers, no sat penalty
+    - terminal
+  action_rate:        -0.02
+  joint_vel_pen:      -0.001
+  torque_pen:         -0.0005
+  torque_sat_pen:      0.0     # OFF — hard clip replaces reward shaping

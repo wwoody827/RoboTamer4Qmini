@@ -1,0 +1,53 @@
+# Recovery v2g — fresh training run with soft normalized torque penalty.
+#
+# Lessons from v2c→v2d→v2e→v2f: v2c's policy is locked into a "torque-
+# addicted" basin (peak τ ≈ 6× motor effort, only works because Isaac Gym
+# silently clips for it). Resume + reward shaping (v2d, v2e, v2f) couldn't
+# pull it out — the basin is too deep.
+#
+# v2g: train from scratch, policy never learns the addicted solution.
+# Constraints baked in from iter 0 via:
+#
+#   1. Soft normalized-squared torque penalty:  Σ (|τ_i| / τ_max_i)²
+#      (vs the hard threshold barrier in v2c-f). Always provides gradient,
+#      no threshold discontinuity. Each joint normalized by its own effort
+#      so hip_roll (60Nm) and hip_yaw (20Nm) are penalized comparably.
+#
+#   2. Default torque DR [0.8, 1.2] — same as base. We're not breaking any
+#      basin, so no need for downward bias.
+#
+#   3. Hard torque limit unchanged (URDF effort) — same reason.
+#
+# Same task structure as v2c (phase-shaped Layer 1b + terminal pose match),
+# but Layer 3 active throughout with the new soft term.
+_base: recovery.yaml
+
+algorithm:
+  entropy_coef: 0.003   # match v2c
+
+reward:
+  layers_enabled:
+    - layer1b_phase_shaped
+    - layer3_smoothness
+    - terminal
+  # Layer 1b phase-shaped (from v2c):
+  orient_w_early: 2.0
+  orient_w_late:  0.5
+  height_w_early: 0.5
+  height_w_late:  2.0
+  foot_contact:               1.0
+  foot_contact_force_thresh:  5.0
+  foot_phase_gate:            0.7
+  # Terminal pose match (from v2c):
+  terminal:        5.0
+  terminal_pose_k: 1.0
+  # Layer 3 soft regularizers (small but always-on):
+  action_rate:           -0.02
+  joint_vel_pen:         -0.001
+  torque_pen:            -0.0001    # base L2 — keep tiny
+  torque_sat_pen:         0.0        # OFF — soft norm replaces it
+  torque_norm_sq_pen:    -0.01       # the new term
+  # Quick scale check: at v2c's behavior (τ ~7× effort on one joint),
+  # ratio_sq for that joint ≈ 49. Ten joints → up to ~50-100. Times -0.01
+  # = -0.5 to -1.0 reward per step. Strong enough to push policy down,
+  # not so strong it overwhelms Layer 1's positive ~2-3.
