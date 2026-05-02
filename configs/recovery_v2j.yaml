@@ -1,0 +1,53 @@
+# Recovery v2j — peak-joint hinge penalty (max over joints, not sum).
+#
+# v2i diagnosis at iter 3500 (3h training):
+#   sim2sim 100-run: success 33%, mean peak ratio 4.79× (worst 6.60×).
+#   v2g baseline at same iter: 23% / 4.04× / 5.79×.
+#   → hinge fires correctly but ratio NOT decreasing fast enough.
+#
+# Why v2i's sum-over-joints hinge was weak:
+#   The penalty is integrated across 333 steps of a 5s episode. A brief
+#   1-2 step burst at ratio=5 on one joint contributes
+#     (5-1)² ≈ 16 per step × 0.05 weight × 1-2 steps = 0.8-1.6 total
+#   while the policy gains huge phase-shaped reward (orient + height +
+#   foot_contact ≈ 5-8 per step × 333 = ~2000 over the episode) for
+#   succeeding. The sum dilutes brief peaks.
+#
+# v2j fix:
+#   1. max-over-joints instead of sum: penalty = max_i (|τ_i|/τ_max_i - 1)²
+#      So burst on ONE joint contributes the same as if all 10 burst.
+#      Removes the dilution effect — peak joint always seen.
+#   2. weight -0.2 (4× v2i): max gives ~1/3-1/5 of sum at typical excess
+#      (only 2-3 joints are bursting at once), so 4× weight roughly
+#      balances. Also the user explicitly asked to "提高瞬时值惩罚".
+#
+# Expected: peak-joint ratio drops below 2× quickly. Success likely
+# 30-50% (lower early due to penalty pressure, recovers).
+_base: recovery.yaml
+
+algorithm:
+  entropy_coef: 0.003
+
+reward:
+  layers_enabled:
+    - layer1b_phase_shaped
+    - layer3_smoothness
+    - terminal
+  # Layer 1b phase-shaped (from v2g/v2i):
+  orient_w_early: 2.0
+  orient_w_late:  0.5
+  height_w_early: 0.5
+  height_w_late:  2.0
+  foot_contact:               1.0
+  foot_contact_force_thresh:  5.0
+  foot_phase_gate:            0.7
+  # Terminal pose match:
+  terminal:        5.0
+  terminal_pose_k: 1.0
+  # Layer 3:
+  action_rate:           -0.02
+  joint_vel_pen:         -0.001
+  torque_pen:            -0.0001
+  torque_sat_pen:         0.0
+  torque_norm_sq_pen:    -0.005      # weak baseline
+  torque_excess_pen:     -0.2        # MAX over joints, 4× v2i weight

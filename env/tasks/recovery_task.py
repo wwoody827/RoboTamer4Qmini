@@ -529,6 +529,14 @@ class RecoveryTask(NullTask):
             # smooth signal needed to shape a fresh policy.
             tau_norm = self.env.react_tau / self.env.torque_limits.unsqueeze(0)
             torque_norm_sq = torch.sum(tau_norm ** 2, dim=1, keepdim=True)
+            # Hinge penalty: only fires when commanded ratio > 1.0× rated
+            # effort. Below rated: zero gradient (free budget). Above rated:
+            # quadratic growth — matches real motor saturation, since hardware
+            # caps at ~rated and there's no user-configurable limit on the
+            # Unitree GO-M8010-6. Training under this penalty produces a
+            # policy that doesn't *rely* on saturation tolerance.
+            tau_excess = (torch.abs(tau_norm) - 1.0).clip(min=0.)
+            torque_excess = torch.max(tau_excess ** 2, dim=1, keepdim=True).values
 
             w_rate    = float(self.rew_weights.get('action_rate',     -0.01))
             w_jerk    = float(self.rew_weights.get('action_jerk',     -0.005))
@@ -536,6 +544,7 @@ class RecoveryTask(NullTask):
             w_torque  = float(self.rew_weights.get('torque_pen',      -0.0001))
             w_sat     = float(self.rew_weights.get('torque_sat_pen',  -0.01))
             w_normsq  = float(self.rew_weights.get('torque_norm_sq_pen', 0.0))
+            w_excess  = float(self.rew_weights.get('torque_excess_pen', 0.0))
             components += [
                 w_rate    * act_rate,
                 w_jerk    * act_jerk,
@@ -543,9 +552,11 @@ class RecoveryTask(NullTask):
                 w_torque  * torque_pen,
                 w_sat     * torque_sat,
                 w_normsq  * torque_norm_sq,
+                w_excess  * torque_excess,
             ]
             names += ['action_rate', 'action_jerk', 'joint_vel_pen',
-                      'torque_pen', 'torque_sat', 'torque_norm_sq']
+                      'torque_pen', 'torque_sat', 'torque_norm_sq',
+                      'torque_excess']
 
         # ─── Layer 4: safety ──────────────────────────────────────────────
         if LAYER_SAFETY in self._layers_enabled:

@@ -234,6 +234,12 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
     CONTACT_THR = 20.0      # N — foot-in-contact threshold (standing ≈ 35N/foot)
     survived     = True
     survive_steps= total_steps
+    # Torque sim2real diagnostics: peak |τ_i| / motor_effort_i across the run.
+    # >1 means policy commands more than the motor can deliver — sim silently
+    # clips, real robot saturates. Same metric as recovery eval.
+    effort_limits = np.abs(model.actuator_forcerange[:NUM_JOINTS, 1]).astype(np.float32)
+    peak_tau   = 0.0
+    peak_ratio = 0.0
 
     for step in range(total_steps):
         if step % decimation == 0:
@@ -271,6 +277,9 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
         torques = compute_torques(current_joint_act, q, dq)
         data.ctrl[:NUM_JOINTS] = torques
         mujoco.mj_step(model, data)
+        abs_tau = np.abs(torques)
+        peak_tau   = max(peak_tau,   float(abs_tau.max()))
+        peak_ratio = max(peak_ratio, float((abs_tau / effort_limits).max()))
 
         z = data.qpos[2]
         if z < fall_thresh:
@@ -432,6 +441,8 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
         'landing_vz_peak': landing_vz_peak,
         'stride_length':  stride_length,
         'stride_asymm':   stride_asymm,
+        'peak_tau_nm':    float(peak_tau),
+        'peak_tau_ratio': float(peak_ratio),
     }
 
 
@@ -450,6 +461,7 @@ def evaluate(cfg, runs, duration, frictions, vx_list, yaw_list, out_path):
         'yaw_error_mean', 'vy_abs_mean', 'roll_rms', 'pitch_rms', 'cot',
         'com_z_rms', 'yaw_osc_rms', 'measured_freq', 'duty_factor',
         'landing_vz_peak', 'stride_length', 'stride_asymm',
+        'peak_tau_nm', 'peak_tau_ratio',
     ]
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -473,9 +485,12 @@ def evaluate(cfg, runs, duration, frictions, vx_list, yaw_list, out_path):
             vx_err    = np.nanmean([r['vx_error_mean'] for r in results])
             vy_drift  = np.nanmean([r['vy_abs_mean'] for r in results])
             roll      = np.nanmean([r['roll_rms'] for r in results])
+            mean_pkr  = np.mean([r['peak_tau_ratio'] for r in results])
+            max_pkr   = np.max ([r['peak_tau_ratio'] for r in results])
             print(f"friction={friction:.1f} vx={cmd_vx:+.1f} yaw={cmd_yaw:+.1f} | "
                   f"survival={surv_rate*100:.0f}%  vx_err={vx_err:.3f}  "
                   f"vy_drift={vy_drift:.3f}  roll_rms={np.degrees(roll):.1f}deg  "
+                  f"τpeak/eff={mean_pkr:.2f}×(max {max_pkr:.2f}×)  "
                   f"[{done}/{total}]")
 
     print(f"\nResults saved to: {out_path}")

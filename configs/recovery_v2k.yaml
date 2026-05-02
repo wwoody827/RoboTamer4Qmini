@@ -1,0 +1,60 @@
+# Recovery v2k — pure action-bound ablation, NO torque penalty.
+#
+# Hypothesis from v2c→v2j retrospective (Gemini-aligned):
+#   v2g/h/i/j all failed at the same wall: PPO locks into a "ballistic flip"
+#   basin where the policy commands extreme q_target → PD error huge → τ
+#   pinned at clip for many steps. Reward shaping (penalty on commanded τ)
+#   can't dislodge the basin: the over-budget portion has zero gradient
+#   under MuJoCo's clip, and PPO finds no path to the quasi-static basin.
+#
+# v2k attacks the problem upstream — at the action layer, not the reward:
+#
+#   Lower the low-pass alpha from 0.5 → 0.1. Effect:
+#     lp_target_new = 0.1 * raw + 0.9 * lp_target_old
+#   so per-step Δq_target ≤ 0.1 × |raw - lp_target| ≤ 0.1 × ~3 rad ≈ 0.3 rad.
+#   Per-step PD error Δ stays ≤ 0.3 rad → Δτ on top of dq term capped at
+#   kp × 0.3 ≈ 6-18 Nm increment per step.
+#
+#   Crucially this only blocks BALLISTIC strategy:
+#     - ballistic flip needs q_target to jump to extreme in 1-2 steps to
+#       maximize transient PD error → blocked by alpha=0.1
+#     - quasi-static stand-up evolves q_target over 30+ steps (~0.5s) →
+#       totally allowed; lp_target reaches extreme asymptotically
+#
+# All torque penalties OFF — pure ablation. If alpha alone gets ratio
+# under 2× with comparable success, we have our deployable solution and
+# don't need RSI. If success drops to 0%, the task fundamentally needs
+# the dynamic strategy and we move to RSI bootstrap.
+#
+# Cheap, clean, falsifiable.
+_base: recovery.yaml
+
+algorithm:
+  entropy_coef: 0.003
+
+action:
+  action_lowpass_alpha: 0.1     # was 0.5 in v2g/h/i/j
+
+reward:
+  layers_enabled:
+    - layer1b_phase_shaped
+    - layer3_smoothness
+    - terminal
+  # Layer 1b phase-shaped (from v2g):
+  orient_w_early: 2.0
+  orient_w_late:  0.5
+  height_w_early: 0.5
+  height_w_late:  2.0
+  foot_contact:               1.0
+  foot_contact_force_thresh:  5.0
+  foot_phase_gate:            0.7
+  # Terminal:
+  terminal:        5.0
+  terminal_pose_k: 1.0
+  # Layer 3: only smoothness, NO torque penalty (pure action-bound test):
+  action_rate:           -0.02
+  joint_vel_pen:         -0.001
+  torque_pen:            -0.0001
+  torque_sat_pen:         0.0
+  torque_norm_sq_pen:     0.0   # OFF
+  torque_excess_pen:      0.0   # OFF

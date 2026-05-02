@@ -1,0 +1,47 @@
+# Recovery v2h — stronger soft normalized torque penalty.
+#
+# v2g result (this checkpoint shipped 100-run sim2sim):
+#   success 61%, mean peak τ/eff ratio 4.85× (worst run 7.19×)
+#   per-pose: supine 78% (clean stand, 0.43m), prone 33%, side ~56%
+#
+# Diagnosis: v2g penalty (-0.01) reduced ratio from v2c's 6.2× to 4.85×, but
+# policy still relies on Isaac Gym + MuJoCo silently clipping torque at URDF
+# effort (60Nm hip_roll, 20Nm rest). On real hardware, motor saturation +
+# heat + gear mech limits make 4-7× rated commands unsafe.
+#
+# Real-deployable target: mean peak ratio < 2×, worst < 3×.
+#
+# v2h: triple the soft penalty (-0.01 → -0.03). At ratio=4.85 a single joint
+# now contributes ~0.7 per step (vs 0.23 in v2g), strong enough to overpower
+# Layer 1's ~2-3 positive reward and push the policy toward lower commanded
+# torques. Cost: success likely drops to 30-40% before recovering.
+#
+# From scratch — resume risks getting stuck in v2g's "rely on clip" basin
+# (same lesson v2c→v2d/e/f taught us).
+_base: recovery.yaml
+
+algorithm:
+  entropy_coef: 0.003
+
+reward:
+  layers_enabled:
+    - layer1b_phase_shaped
+    - layer3_smoothness
+    - terminal
+  # Layer 1b phase-shaped (from v2g):
+  orient_w_early: 2.0
+  orient_w_late:  0.5
+  height_w_early: 0.5
+  height_w_late:  2.0
+  foot_contact:               1.0
+  foot_contact_force_thresh:  5.0
+  foot_phase_gate:            0.7
+  # Terminal pose match:
+  terminal:        5.0
+  terminal_pose_k: 1.0
+  # Layer 3 soft regularizers — main change vs v2g is torque_norm_sq_pen:
+  action_rate:           -0.02
+  joint_vel_pen:         -0.001
+  torque_pen:            -0.0001
+  torque_sat_pen:         0.0
+  torque_norm_sq_pen:    -0.03    # v2g had -0.01 → tripled

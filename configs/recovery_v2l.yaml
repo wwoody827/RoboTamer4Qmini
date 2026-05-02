@@ -1,0 +1,53 @@
+# Recovery v2l — action-bound sweet spot search (alpha=0.3).
+#
+# v2k (alpha=0.1) result:
+#   τpeak crushed to 1.02× (worst 1.26×) — completely deployable
+#   BUT 0% success across 10000 iters — z/tilt never moved from start
+#   alpha=0.1 too restrictive to cross dead-center from prone
+#
+# v2g (alpha=0.5, no action-bound) result:
+#   61% success but τpeak 4.85× — ballistic, not deployable
+#
+# v2l: alpha=0.3 — middle ground.
+#   Per-step Δq_target ≤ 0.3 × ~3 rad ≈ 0.9 rad max change.
+#   Compare:
+#     alpha=0.5 (v2g): 1.5 rad/step max — ballistic in 1-2 steps
+#     alpha=0.3 (v2l): 0.9 rad/step max — semi-dynamic; 3-4 steps to extreme
+#     alpha=0.1 (v2k): 0.3 rad/step max — purely quasi-static; 10+ steps
+#
+# Hypothesis: 0.3 leaves enough transient capacity to break dead-center
+# from prone, while bounding peak commanded τ. If success > 30% with
+# τpeak < 2.5×, this is our sweet spot — no RSI needed.
+#
+# Same reward as v2k (no torque penalty, pure ablation on alpha).
+_base: recovery.yaml
+
+algorithm:
+  entropy_coef: 0.003
+
+action:
+  action_lowpass_alpha: 0.3     # v2k=0.1 (too tight), v2g default=0.5 (too loose)
+
+reward:
+  layers_enabled:
+    - layer1b_phase_shaped
+    - layer3_smoothness
+    - terminal
+  # Layer 1b phase-shaped (from v2g):
+  orient_w_early: 2.0
+  orient_w_late:  0.5
+  height_w_early: 0.5
+  height_w_late:  2.0
+  foot_contact:               1.0
+  foot_contact_force_thresh:  5.0
+  foot_phase_gate:            0.7
+  # Terminal:
+  terminal:        5.0
+  terminal_pose_k: 1.0
+  # Layer 3: only smoothness, NO torque penalty (keeping ablation pure):
+  action_rate:           -0.02
+  joint_vel_pen:         -0.001
+  torque_pen:            -0.0001
+  torque_sat_pen:         0.0
+  torque_norm_sq_pen:     0.0
+  torque_excess_pen:      0.0

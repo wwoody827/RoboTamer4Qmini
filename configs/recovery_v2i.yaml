@@ -1,0 +1,57 @@
+# Recovery v2i — hinge-penalty above 1.0× rated, sim2real-aligned.
+#
+# Key insight from research on Unitree GO-M8010-6 + Unitree SDK:
+#   - User has NO way to configure motor torque/current limit. Hardware
+#     caps at ~rated (40A current, 23.7Nm peak), firmware-locked.
+#   - Therefore real-deploy safety must come from the policy itself
+#     "voluntarily" staying within rated, not from a sim-side hard clip
+#     that has no real-robot counterpart.
+#
+# v2g/v2h lessons:
+#   - v2g (-0.01 quadratic norm penalty): mean ratio 4.85×, success 61%.
+#     Ratio stayed high because penalty pushes everywhere — including
+#     the steady-state "holding upright" zone where modest torque is fine.
+#   - v2h (-0.03 quadratic): broke the task. ever_upright 91% but final
+#     success 1% — policy used burst torque to flip then collapsed because
+#     penalty also suppressed sustaining torque.
+#
+# v2i design:
+#   - torque_limit_scale: 1.0 — match real motor (no fake margin in sim).
+#   - torque_norm_sq_pen: -0.005 — weak baseline, gentle nudge to prefer
+#     lower torque overall (helps with cleanliness, not safety).
+#   - torque_excess_pen: -0.05 — HINGE. Penalty is max(0, ratio-1.0)²,
+#     zero below rated (policy free to use full budget for flip/stand),
+#     sharp quadratic above rated. ratio=2 → contributes 1.0/joint;
+#     ratio=4 → 9.0/joint. Strong enough to fight saturation reliance.
+#
+# Expected: success 50-70%, mean peak ratio drops below 1.5×,
+# worst-run ratio below 2.5×. Real-deploy safe because policy doesn't
+# *need* saturation to succeed.
+_base: recovery.yaml
+
+algorithm:
+  entropy_coef: 0.003
+
+reward:
+  layers_enabled:
+    - layer1b_phase_shaped
+    - layer3_smoothness
+    - terminal
+  # Layer 1b phase-shaped (from v2g):
+  orient_w_early: 2.0
+  orient_w_late:  0.5
+  height_w_early: 0.5
+  height_w_late:  2.0
+  foot_contact:               1.0
+  foot_contact_force_thresh:  5.0
+  foot_phase_gate:            0.7
+  # Terminal pose match:
+  terminal:        5.0
+  terminal_pose_k: 1.0
+  # Layer 3 — main change vs v2g/v2h:
+  action_rate:           -0.02
+  joint_vel_pen:         -0.001
+  torque_pen:            -0.0001
+  torque_sat_pen:         0.0       # OFF (replaced by excess hinge)
+  torque_norm_sq_pen:    -0.005     # weak baseline (v2g had -0.01)
+  torque_excess_pen:     -0.05      # HINGE: only above 1.0× rated
