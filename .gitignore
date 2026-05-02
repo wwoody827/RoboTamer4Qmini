@@ -11,3 +11,7 @@ __pycache__/
 
 # Package
 IsaacGym_Preview_3_Package.tar.gz
+
+# Backups / runtime dumps
+*.bak
+MUJOCO_LOG.TXT
