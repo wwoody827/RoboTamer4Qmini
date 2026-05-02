@@ -1,0 +1,50 @@
+# Recovery v2m — RSI bootstrap from v2g iter 5000 successful trajectories.
+#
+# Pivot: v2k (alpha=0.1) and v2l (alpha=0.3) confirmed action-bound alone
+# can't produce a successful policy from pure-fallen init — quasi-static
+# stand-up has too long a horizon for random exploration (10000 iters,
+# 0% / 6.7% success at alpha=0.1 / 0.3 respectively).
+#
+# v2g (alpha=0.5, no action constraint) DOES find a strategy: 61% success
+# with τpeak ~5×. The strategy is ballistic but it works. Idea: use v2g's
+# trajectories as reference state initialization (DeepMimic-style RSI) so
+# new policies start each episode partway through the recovery, not from
+# zero. This shortens the credit-assignment horizon dramatically.
+#
+# Pool composition (data/recovery_init_states_rsi.npz):
+#   2000 fallen poses (original) + 3984 RSI frames sampled at episode
+#   progress 0.3, 0.5, 0.7 from 1328 successful v2g rollouts.
+#   → ~33% start fully fallen, ~67% start mid-recovery.
+#   The curriculum bins by tilt/height-frac, so progress=0.7 frames
+#   (near-upright, tilt<30°) feed stage1; progress=0.3 (still mid-fall)
+#   feeds stage3. Natural difficulty grading.
+#
+# Otherwise IDENTICAL to v2g (alpha=0.5, same reward, weak torque norm).
+# Pure ablation on init pool.
+_base: recovery.yaml
+
+task:
+  init_states_path: data/recovery_init_states_rsi.npz
+
+algorithm:
+  entropy_coef: 0.003
+
+reward:
+  layers_enabled:
+    - layer1b_phase_shaped
+    - layer3_smoothness
+    - terminal
+  orient_w_early: 2.0
+  orient_w_late:  0.5
+  height_w_early: 0.5
+  height_w_late:  2.0
+  foot_contact:               1.0
+  foot_contact_force_thresh:  5.0
+  foot_phase_gate:            0.7
+  terminal:        5.0
+  terminal_pose_k: 1.0
+  action_rate:           -0.02
+  joint_vel_pen:         -0.001
+  torque_pen:            -0.0001
+  torque_sat_pen:         0.0
+  torque_norm_sq_pen:    -0.01
