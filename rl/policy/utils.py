@@ -7,7 +7,7 @@ import torch.nn as nn
 def load_actor(cfg: dict, device='cpu', deploy=False, **kwargs):
     assert 'name' in cfg
     cfg = copy.deepcopy(cfg)
-    policy_module = importlib.import_module(f"model.{cfg['name']}")
+    policy_module = importlib.import_module(f"rl.policy.{cfg['name']}")
     del cfg['name']
     return getattr(policy_module, 'Actor')(**cfg, device=device, deploy=deploy, **kwargs).to(device)
 
@@ -15,7 +15,7 @@ def load_actor(cfg: dict, device='cpu', deploy=False, **kwargs):
 def load_critic(cfg: dict, device='cpu', **kwargs):
     assert 'name' in cfg
     cfg = copy.deepcopy(cfg)
-    policy_module = importlib.import_module(f"model.{cfg['name']}")
+    policy_module = importlib.import_module(f"rl.policy.{cfg['name']}")
     del cfg['name']
     return getattr(policy_module, 'Critic')(**cfg, device=device, **kwargs).to(device)
 
