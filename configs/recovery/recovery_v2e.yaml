@@ -14,7 +14,7 @@
 #   - success crashes < 50%, ratio doesn't budge → v2c policy is fundamentally
 #     "torque-addicted" and we need to retrain from scratch with a curriculum
 #     on torque_sat_thresh (start lenient, tighten over training).
-_base: recovery_v2c.yaml
+_base: recovery/recovery_v2c.yaml
 
 reward:
   groups_enabled:

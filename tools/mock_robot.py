@@ -4,7 +4,7 @@ Mock robot UDP broadcaster for debugging visualizer_web.py without a real robot.
 Sends 53-float packets at 20Hz on the same port/format as RoboTamerSdk4Qmini.
 
 Usage:
-    python3 mock_robot.py [--port 9870] [--mode walk|stand|sin]
+    python3 tools/mock_robot.py [--port 9870] [--mode walk|stand|sin]
 
 Modes:
     stand  — joints hold zero position, slow RPY sway

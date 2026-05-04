@@ -18,7 +18,7 @@
 #
 # Other settings same as v2c (torque DR [0.8,1.2], no sat penalty — the
 # hard clip is the constraint, no need to also reward-shape).
-_base: recovery_v2c.yaml
+_base: recovery/recovery_v2c.yaml
 
 domain_rand:
   torque_limit_scale: 0.6   # ×URDF effort. 1.0 = unchanged.

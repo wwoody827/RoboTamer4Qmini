@@ -20,7 +20,7 @@
 #
 # Same task structure as v2c (phase-shaped Layer 1b + terminal pose match),
 # but Layer 3 active throughout with the new soft term.
-_base: recovery.yaml
+_base: recovery/recovery.yaml
 
 algorithm:
   entropy_coef: 0.003   # match v2c

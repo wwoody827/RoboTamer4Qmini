@@ -5,7 +5,7 @@
 #             failure_pen   = -1 if not upright at terminal
 # Effect: a squatted-but-upright pose loses ~70% of the success bonus, gradient
 # pushes toward extended legs (matching ref_joint_pos).
-_base: recovery_v2.yaml
+_base: recovery/recovery_v2.yaml
 
 reward:
   terminal_pose_k: 1.0    # exp(-k * ||jp - ref_jp||²); k=1 gives ~0.27 reward at squat

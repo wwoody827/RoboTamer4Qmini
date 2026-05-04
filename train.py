@@ -5,7 +5,7 @@ from env.utils import get_args
 from env.utils.helpers import set_seed, parse_sim_params
 from env import LeggedRobotEnv, GymEnvWrapper
 from env.tasks import load_task_cls
-from model import load_actor, load_critic
+from rl.policy import load_actor, load_critic
 from rl.alg import PPO
 import time
 from collections import deque

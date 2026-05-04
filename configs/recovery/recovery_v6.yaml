@@ -32,7 +32,7 @@
 # Keeping v5's k=4, w=2 for pose_match — they help on balance/tilted (which
 # v6 must not regress) and don't harm fallen recovery (where pose_match is
 # saturated at 0 anyway from err=1).
-_base: recovery_v3.yaml
+_base: recovery/recovery_v3.yaml
 
 reward:
   # shaping_static — re-enable original height term alongside pose_match

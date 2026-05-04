@@ -17,7 +17,7 @@
 # Tradeoff: lose ~30% of boundary gradient, gain order-of-magnitude on the
 # fallen-pose region. With v3's evidence that the bottleneck is err>0.5,
 # this is the right reallocation.
-_base: recovery_v3.yaml
+_base: recovery/recovery_v3.yaml
 
 reward:
   pose_match:    2.0   # was 1.0

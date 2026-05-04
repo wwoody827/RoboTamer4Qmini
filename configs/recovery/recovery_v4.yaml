@@ -11,7 +11,7 @@
 #      v3 oscillated 63→67→50% in the last 1500 iters; n=30 has 3.33%
 #      noise floor per sample. n=100 reduces eval variance and exposes
 #      whether late-stage swing is real instability or eval noise.
-_base: recovery_v3.yaml
+_base: recovery/recovery_v3.yaml
 
 reward:
   pose_match_k: 16.0

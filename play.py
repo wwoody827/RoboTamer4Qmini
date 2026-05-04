@@ -11,7 +11,7 @@ from env import LeggedRobotEnv, GymEnvWrapper
 from env.tasks import load_task_cls
 from env.utils import get_args
 from env.utils.helpers import set_seed, parse_sim_params
-from model import load_actor
+from rl.policy import load_actor
 from config.loader import load_config, CfgNode
 from env.utils.math import scale_transform
 import pandas as pd

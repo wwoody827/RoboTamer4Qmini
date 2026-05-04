@@ -10,7 +10,7 @@ Run mock_robot.py --mode pose to also broadcast those positions via UDP
 so the plots update too.
 
 Usage:
-    python3 visualizer_web.py [--udp-port 9870] [--http-port 8080] [--history 200]
+    python3 tools/visualizer_web.py [--udp-port 9870] [--http-port 8080] [--history 200]
 """
 
 import argparse

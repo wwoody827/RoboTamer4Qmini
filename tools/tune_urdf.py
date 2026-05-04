@@ -1,11 +1,13 @@
 # This file is used to tune PID without RL learning, run it to see how well it will behave
 # Parameters 'p' & 'd' can be changed in line 118 & 119
 # Data will be saved in foldr 'excel/tune_PID'
+import os
+import sys
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import time
 import math
 import numpy as np
 from isaacgym import gymapi, gymutil, gymtorch
-import os
 from math import pi
 import matplotlib.pyplot as plt
 import pandas as pd

@@ -96,7 +96,7 @@ Key differences from walking task:
 
 ### 2.2 New Config
 
-Create `configs/recovery.yaml` extending a base config. Key fields:
+Create `configs/recovery/recovery.yaml` extending a base config. Key fields:
 
 ```yaml
 _base: configs/_base/qmini_base.yaml  # adjust path to actual base
@@ -442,12 +442,12 @@ Total: **~3500–5000 iterations**, ~2–4 hours on a single 4090.
 
 ```bash
 # Phase A - D iteratively, each phase resumes from previous
-python train.py --config configs/recovery.yaml --name recovery_v1 \
+python train.py --config configs/recovery/recovery.yaml --name recovery_v1 \
     --max_iterations 500 \
     --reward_phase A
 
 # resume:
-python train.py --config configs/recovery.yaml --name recovery_v1 \
+python train.py --config configs/recovery/recovery.yaml --name recovery_v1 \
     --resume --max_iterations 1000 \
     --reward_phase B
 # ... etc
@@ -636,7 +636,7 @@ RoboTamer4Qmini/
 │   ├── recovery_task.py              # NEW: recovery RL environment
 │   └── recovery_init_generator.py    # NEW: simulated fall dataset generator
 ├── configs/
-│   └── recovery.yaml                 # NEW: recovery training config
+│   └── recovery/recovery.yaml        # NEW: recovery training config
 ├── data/
 │   └── recovery_init_states.npz      # GENERATED: fall state dataset
 ├── deploy/

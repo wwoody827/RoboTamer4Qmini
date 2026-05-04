@@ -11,7 +11,7 @@
 #       so policy uses motors freely up to 80% but pays sharply above that
 #   (3) DR torque_range biased *downward* [0.7, 1.0] — policy must work even
 #       when real motors deliver only 70% of URDF effort
-_base: recovery_v2c.yaml
+_base: recovery/recovery_v2c.yaml
 
 domain_rand:
   # Was [0.8, 1.2] (default). Removing the >1.0 tail forces the policy to

@@ -45,7 +45,7 @@
 #   - overall sim2sim falls below 70% sustained → same
 #
 # If v7 succeeds we have a deploy-ready ckpt: 80%+ recovery with sane torque.
-_base: recovery_v3.yaml
+_base: recovery/recovery_v3.yaml
 
 reward:
   # height term carry-over from v6 — the one that unlocked get-up

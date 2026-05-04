@@ -20,7 +20,7 @@
 # τpeak < 2.5×, this is our sweet spot — no RSI needed.
 #
 # Same reward as v2k (no torque penalty, pure ablation on alpha).
-_base: recovery.yaml
+_base: recovery/recovery.yaml
 
 algorithm:
   entropy_coef: 0.003

@@ -208,7 +208,7 @@ def _build_obs_per_step(slots: Sequence[str], pkt: SensorPacket,
                         episode_step: int, episode_length: int):
     """Construct one timestep's observation matching the slot list.
 
-    Supports the slots used by `configs/recovery.yaml` and the BIRL configs.
+    Supports the slots used by `configs/recovery/recovery.yaml` and the BIRL configs.
     Unknown slots raise — fail fast at deploy time rather than ship junk obs.
     """
     parts = []

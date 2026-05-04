@@ -5,7 +5,7 @@ import os
 from os.path import exists, join
 import torch.nn as nn
 
-from model import load_actor
+from rl.policy import load_actor
 from env.utils import get_args
 from config.loader import load_config, CfgNode, config_to_dict
 from deploy.manifest import build_manifest, save_manifest

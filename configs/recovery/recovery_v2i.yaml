@@ -27,7 +27,7 @@
 # Expected: success 50-70%, mean peak ratio drops below 1.5×,
 # worst-run ratio below 2.5×. Real-deploy safe because policy doesn't
 # *need* saturation to succeed.
-_base: recovery.yaml
+_base: recovery/recovery.yaml
 
 algorithm:
   entropy_coef: 0.003

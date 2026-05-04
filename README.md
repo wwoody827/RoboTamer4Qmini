@@ -141,11 +141,11 @@ $ python export_pt2onnx.py --name <name>
 
 ### **To load a urdf model:**
 ```bash
-$ python tune_urdf.py
+$ python tools/tune_urdf.py
 ```
 ### **To optimize PID parameters to minimize the discrepancy between simulation and real-world robot behavior:**
 ```bash
-$ python tune_pid.py
+$ python tools/tune_pid.py
 ```
   - --mode <str> # Test mode: {'sin,', 'real,', 'reset,'}. Select test mode (simulation, real-world, or reset).
 
