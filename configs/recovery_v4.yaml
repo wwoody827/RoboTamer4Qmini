@@ -1,0 +1,17 @@
+# Recovery v4 — resume from recovery_v3 iter 9000 (best stable, 63% sim2sim).
+#
+# Two changes vs v3:
+#   1. pose_match_k 8 → 16. exp(-k·err²) at err=0.3 (success boundary):
+#      k=8  → 0.49; k=16 → 0.24. Sharper gradient near the success cliff,
+#      where v3 plateaued (pose_err glued at 0.7-0.9, success bucketed
+#      noisily). High-err side (err>0.5) loses gradient under k=16, but the
+#      seed policy already crossed that hump in v3, so we're optimizing the
+#      fine-tuning regime, not the breakthrough regime.
+#   2. sim2sim eval n=30 → 100 (default change in sim2sim_recovery.py).
+#      v3 oscillated 63→67→50% in the last 1500 iters; n=30 has 3.33%
+#      noise floor per sample. n=100 reduces eval variance and exposes
+#      whether late-stage swing is real instability or eval noise.
+_base: recovery_v3.yaml
+
+reward:
+  pose_match_k: 16.0

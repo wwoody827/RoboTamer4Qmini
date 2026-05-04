@@ -8,18 +8,18 @@ Architecturally distinct from BIRLTask:
     - 10-dim absolute action with low-pass filter (smoothness via filtering)
     - obs_history = 1 (Markovian)
     - Init pool from data/recovery_init_states.npz (settled fallen poses)
-    - Layered reward, gated by `cfg.reward.layers_enabled`
+    - Reward composed of orthogonal *groups*, gated by `cfg.reward.groups_enabled`
 
-The reward is built up incrementally during training:
-    Layer 1 (always): height + orientation tracking (exp form)
-    Layer 2:          stability bonus (conditional on is_upright)
-    Layer 3:          smoothness penalties
-    Layer 4:          safety penalties
-    Terminal:         once-per-episode bonus / penalty at episode end
+Reward groups (orthogonal concerns, not progressive layers):
+    shaping_static: dense exp-shaped pose-match + orientation tracking
+    shaping_phased: phase-conditioned shaping (orient early, pose late)
+    stability:      bonus when upright with low base velocity
+    smoothness:     action-rate / jerk / torque penalties
+    safety:         joint-limit and contact-force penalties
+    terminal:       once-per-episode bonus / penalty at episode end
 
-This file is the scaffold. Reward layers can be flipped on individually via the
-`layers_enabled` config field, allowing the staged Phase A → D training plan
-without code changes.
+Any subset of groups can be enabled per config; the historical "layer" naming
+(layer1/layer2/...) is gone — these are orthogonal groups, not stages.
 """
 
 import numpy as np
@@ -58,13 +58,13 @@ def _joint_pos_abs(task):
 
 # ─── RecoveryTask ───────────────────────────────────────────────────────────
 
-# Reward layer keys (for cfg.reward.layers_enabled):
-LAYER_HEIGHT_ORIENT       = 'layer1_height_orient'
-LAYER_PHASE_SHAPED        = 'layer1b_phase_shaped'
-LAYER_STABILITY           = 'layer2_stability'
-LAYER_SMOOTHNESS          = 'layer3_smoothness'
-LAYER_SAFETY              = 'layer4_safety'
-LAYER_TERMINAL            = 'terminal'
+# Reward group keys (for cfg.reward.groups_enabled):
+GROUP_SHAPING_STATIC      = 'shaping_static'
+GROUP_SHAPING_PHASED      = 'shaping_phased'
+GROUP_STABILITY           = 'stability'
+GROUP_SMOOTHNESS          = 'smoothness'
+GROUP_SAFETY              = 'safety'
+GROUP_TERMINAL            = 'terminal'
 
 
 @register
@@ -153,6 +153,13 @@ class RecoveryTask(NullTask):
             raise ValueError("RecoveryTask requires cfg.task.init_states_path "
                              "(e.g. data/recovery_init_states.npz)")
         self._load_init_pool(init_path)
+        # PD target on episode reset: 'sampled' = match injected qpos (limp),
+        # 'ref' = standing reference (PD actively supports). See _inject_init_states.
+        self._init_pd_target = getattr(self.cfg.task, 'init_pd_target', 'sampled')
+        if self._init_pd_target not in ('sampled', 'ref'):
+            raise ValueError(f"task.init_pd_target must be 'sampled' or 'ref', "
+                             f"got '{self._init_pd_target}'")
+        print(f"[RecoveryTask] init_pd_target={self._init_pd_target}")
 
         # ─── Curriculum (optional) ─────────────────────────────────────────
         cur_cfg = getattr(self.cfg.task, 'curriculum', None)
@@ -173,18 +180,20 @@ class RecoveryTask(NullTask):
         # Tracks which envs were sampled this episode, to record outcomes on done.
         self._episode_active = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
-        # ─── Reward layers ─────────────────────────────────────────────────
-        layers = list(getattr(self.cfg.reward, 'layers_enabled', []) or [])
-        if not layers:
-            # default: Layer 1 only (Phase A)
-            layers = [LAYER_HEIGHT_ORIENT]
-        self._layers_enabled = set(layers)
+        # ─── Reward groups ─────────────────────────────────────────────────
+        groups = list(getattr(self.cfg.reward, 'groups_enabled', []) or [])
+        if not groups:
+            # default: dense static shaping only
+            groups = [GROUP_SHAPING_STATIC]
+        self._groups_enabled = set(groups)
         self.rew_weights = self.cfg.reward.to_dict() if self.cfg.reward is not None else {}
 
-        # Targets
+        # Targets. Success criterion is now ||q - q_ref|| AND tilt — z height is
+        # observable but not gated, since PD-to-ref already lands at z≈0.44m
+        # (the issue was *policy* squatting, not PD pulling low). _target_height
+        # is kept only as an informational reference for logging.
         self._target_height = float(getattr(self.cfg.task, 'target_height', 0.45))
-        self._target_height_ratio = float(getattr(self.cfg.task, 'target_height_ratio', 0.85))
-        self._success_height = self._target_height_ratio * self._target_height
+        self._success_pose_err = float(getattr(self.cfg.task, 'success_pose_err', 0.3))
         self._success_tilt = float(getattr(self.cfg.task, 'success_tilt_deg', 25.0))
 
         # ─── Obs builder ───────────────────────────────────────────────────
@@ -290,10 +299,21 @@ class RecoveryTask(NullTask):
             len(env_id_int32),
         )
 
-        # Reset action buffers so PD doesn't snap from old target
-        self.current_joint_act[env_ids] = self._pool_joint_pos[idx]
-        self._lp_target[env_ids] = self._pool_joint_pos[idx]
-        self.joint_act_for_pd[env_ids] = self._pool_joint_pos[idx]
+        # Reset action buffers so PD doesn't snap from old target.
+        # init_pd_target='sampled' (default, backward-compat): PD target = current
+        # joint pose → zero PD error → zero torque at reset → robot is "limp"
+        # and gravity acts before policy can react. OK for fallen poses (already
+        # on ground) but disastrous for upright/perturbed init.
+        # init_pd_target='ref': PD target = standing reference → PD actively
+        # pulls toward standing → robot is supported from step 0 → policy learns
+        # small modulations around a stable baseline (Cassie/H1 community std).
+        if self._init_pd_target == 'ref':
+            target = self.ref_joint_action[env_ids]
+        else:
+            target = self._pool_joint_pos[idx]
+        self.current_joint_act[env_ids] = target.clone()
+        self._lp_target[env_ids] = target.clone()
+        self.joint_act_for_pd[env_ids] = target.clone()
 
     # ──────────────────────────────────────────────────────────────────────
     # NullTask interface
@@ -386,15 +406,19 @@ class RecoveryTask(NullTask):
     # ──────────────────────────────────────────────────────────────────────
 
     def _is_upright(self):
-        # Body +Z aligned with world +Z within `success_tilt`.
-        # projected_gravity ~ [0, 0, -1] when upright (gravity points to -body_z).
+        # Success = body +Z aligned with world +Z (tilt < threshold) AND
+        #          joint angles close to the nominal standing pose.
+        # Replaces the old z-height gate, since PD-to-ref already produces
+        # z≈0.44m; the failure mode we want to reject is *policy-induced*
+        # squatting at q ≠ q_ref.
         pg = self.env.projected_gravity
-        # cosine between body_z and world_z = -pg_z
         cos_tilt = -pg[:, 2:3]
         cos_thresh = float(np.cos(np.deg2rad(self._success_tilt)))
         upright = cos_tilt > cos_thresh
-        height_ok = self.env.base_pos[:, [2]] > self._success_height
-        return (upright & height_ok).float()
+        ref_jp = self.ref_joint_action
+        pose_err = torch.norm(self.env.joint_pos - ref_jp, dim=1, keepdim=True)
+        pose_ok = pose_err < self._success_pose_err
+        return (upright & pose_ok).float()
 
     def terminate(self):
         # Termination conditions for recovery:
@@ -429,55 +453,73 @@ class RecoveryTask(NullTask):
 
         is_upright = self._is_upright()  # [num_envs, 1] in {0., 1.}
 
-        # ─── Layer 1: height + orientation (always-on baseline) ────────────
-        if LAYER_HEIGHT_ORIENT in self._layers_enabled:
-            # Height: exp(-k * (z - target)^2). Default k=2 gives ~0.7 reward at
-            # z=0m (prone) rising to 1.0 at target — soft enough to provide a
-            # gradient from a fallen start.
-            z = self.env.base_pos[:, [2]]
-            k_h = float(self.rew_weights.get('height_k', 2.0))
-            height_rew = torch.exp(-k_h * (z - self._target_height) ** 2)
+        # ─── shaping_static: pose-match + orientation (always-on baseline) ─
+        if GROUP_SHAPING_STATIC in self._groups_enabled:
+            # Pose match: exp(-k * ||q - q_ref||^2). Replaces height tracking —
+            # PD-to-ref equilibrium produces z≈0.44m anyway, so chasing height
+            # was redundant; the real failure mode is the policy *moving* the
+            # joints into a squat to dodge pushes. Penalizing ||q-q_ref||
+            # directly attacks that. k=8 gives ~0.5 reward at ||err||=0.3
+            # (success threshold) and ~0 at ||err||=0.8 (deep squat).
+            ref_jp = self.ref_joint_action
+            jp_err_sq = torch.sum((self.env.joint_pos - ref_jp) ** 2, dim=1, keepdim=True)
+            k_p = float(self.rew_weights.get('pose_match_k', 8.0))
+            pose_rew = torch.exp(-k_p * jp_err_sq)
 
-            # Orientation: exp(-k * tilt^2). Default k=0.2 gives ~0.14 reward at
-            # tilt=π (inverted) rising to 1.0 at upright.
+            # Orientation: exp(-k * tilt^2). k=0.5 → ~0.85 reward at 25° tilt.
             pg_z = self.env.projected_gravity[:, [2]]
             cos_tilt = (-pg_z).clip(-1., 1.)
-            tilt = torch.acos(cos_tilt)  # 0 when upright, pi when fully inverted
-            k_o = float(self.rew_weights.get('orientation_k', 0.2))
+            tilt = torch.acos(cos_tilt)
+            k_o = float(self.rew_weights.get('orientation_k', 0.5))
             orient_rew = torch.exp(-k_o * tilt ** 2)
 
-            w_h = float(self.rew_weights.get('height', 1.0))
+            w_p = float(self.rew_weights.get('pose_match', 1.0))
             w_o = float(self.rew_weights.get('orientation', 1.0))
-            components += [w_h * height_rew, w_o * orient_rew]
-            names += ['height', 'orientation']
+            components += [w_p * pose_rew, w_o * orient_rew]
+            names += ['pose_match', 'orientation']
 
-        # ─── Layer 1b: phase-conditioned shaping (BD_X-inspired episodic) ──
+            # Height tracking: exp(-k * (z - target)^2). Re-added for v6 — v5
+            # by_label eval showed pose_match is satisfied by lying flat with
+            # legs straight (joints match ref at z≈0.17m), so without a height
+            # signal nothing rewards the *act of getting up*. Same shape as
+            # the pre-pose_match version. Default w=0 keeps it off for older
+            # configs; v6 turns it on.
+            w_h = float(self.rew_weights.get('height', 0.0))
+            if w_h != 0.0:
+                z = self.env.base_pos[:, [2]]
+                k_h = float(self.rew_weights.get('height_k', 2.0))
+                height_rew = torch.exp(-k_h * (z - self._target_height) ** 2)
+                components.append(w_h * height_rew)
+                names.append('height')
+
+        # ─── shaping_phased: phase-conditioned shaping (BD_X-inspired) ────
         # Reward profile changes over the episode using episode_progress p∈[0,1]:
-        #   early (p→0): orient_w high, height_w low → "get torso upright first"
-        #   late  (p→1): orient_w low,  height_w high → "stand at target height"
+        #   early (p→0): orient_w high, pose_w low → "get torso upright first"
+        #   late  (p→1): orient_w low,  pose_w high → "match nominal pose"
         #   foot_contact bonus only kicks in for p > foot_phase_gate
-        # All three terms are exp-shaped on the same physical signals as Layer 1.
-        if LAYER_PHASE_SHAPED in self._layers_enabled:
+        # Same physical signals as shaping_static, but weights schedule over time.
+        if GROUP_SHAPING_PHASED in self._groups_enabled:
             p = (self.env.episode_length_buf.float()
                  / max(self.env.max_episode_length, 1)).unsqueeze(-1)
 
-            z = self.env.base_pos[:, [2]]
-            k_h = float(self.rew_weights.get('height_k', 2.0))
-            height_rew_b = torch.exp(-k_h * (z - self._target_height) ** 2)
+            ref_jp = self.ref_joint_action
+            jp_err_sq = torch.sum((self.env.joint_pos - ref_jp) ** 2, dim=1, keepdim=True)
+            k_p = float(self.rew_weights.get('pose_match_k', 8.0))
+            pose_rew_b = torch.exp(-k_p * jp_err_sq)
 
             pg_z = self.env.projected_gravity[:, [2]]
             cos_tilt = (-pg_z).clip(-1., 1.)
             tilt = torch.acos(cos_tilt)
-            k_o = float(self.rew_weights.get('orientation_k', 0.2))
+            k_o = float(self.rew_weights.get('orientation_k', 0.5))
             orient_rew_b = torch.exp(-k_o * tilt ** 2)
 
             # Linear schedule: weight slides between early and late values.
             o_early = float(self.rew_weights.get('orient_w_early', 2.0))
             o_late  = float(self.rew_weights.get('orient_w_late',  0.5))
-            h_early = float(self.rew_weights.get('height_w_early', 0.5))
-            h_late  = float(self.rew_weights.get('height_w_late',  2.0))
+            p_early = float(self.rew_weights.get('pose_w_early',   0.5))
+            p_late  = float(self.rew_weights.get('pose_w_late',    2.0))
             orient_w = o_early + (o_late - o_early) * p
-            height_w = h_early + (h_late - h_early) * p
+            pose_w = p_early + (p_late - p_early) * p
 
             # Foot contact bonus: both feet in contact, only in late phase.
             foot_thresh = float(self.rew_weights.get('foot_contact_force_thresh', 5.0))
@@ -489,13 +531,13 @@ class RecoveryTask(NullTask):
 
             components += [
                 orient_w * orient_rew_b,
-                height_w * height_rew_b,
+                pose_w * pose_rew_b,
                 foot_w * foot_rew,
             ]
-            names += ['orient_phased', 'height_phased', 'foot_contact_late']
+            names += ['orient_phased', 'pose_phased', 'foot_contact_late']
 
-        # ─── Layer 2: stability bonus (gated on is_upright) ────────────────
-        if LAYER_STABILITY in self._layers_enabled:
+        # ─── stability: bonus when upright with low base velocity ─────────
+        if GROUP_STABILITY in self._groups_enabled:
             base_lin_v = torch.norm(self.env.base_lin_vel, dim=1, keepdim=True)
             base_ang_v = torch.norm(self.env.base_ang_vel, dim=1, keepdim=True)
             stability = torch.exp(-1.0 * base_lin_v) * torch.exp(-0.5 * base_ang_v)
@@ -505,8 +547,8 @@ class RecoveryTask(NullTask):
             components.append(w_s * stab_rew)
             names.append('stability')
 
-        # ─── Layer 3: smoothness penalties (negative; small) ──────────────
-        if LAYER_SMOOTHNESS in self._layers_enabled:
+        # ─── smoothness: action-rate / jerk / torque penalties ───────────
+        if GROUP_SMOOTHNESS in self._groups_enabled:
             a_now = self.action_history[-1]
             a_prev = self.action_history[-2]
             a_pp   = self.action_history[-3]
@@ -537,6 +579,15 @@ class RecoveryTask(NullTask):
             # policy that doesn't *rely* on saturation tolerance.
             tau_excess = (torch.abs(tau_norm) - 1.0).clip(min=0.)
             torque_excess = torch.max(tau_excess ** 2, dim=1, keepdim=True).values
+            # Smooth saturation surrogate: τ - τ_max·tanh(τ/τ_max). For |τ| ≪
+            # τ_max it's ≈ 0 (no penalty in normal range); as |τ| grows past
+            # rated, it asymptotes to τ - τ_max·sign(τ). Crucially, the
+            # gradient is non-zero everywhere (including past the MuJoCo
+            # forcerange clip), so PPO can pull a "torque-addicted" policy
+            # out of a ballistic basin — unlike the hinge above, whose
+            # gradient over the clipped portion is killed by the simulator.
+            tau_smooth_excess = self.env.react_tau - self.env.torque_limits.unsqueeze(0) * torch.tanh(tau_norm)
+            torque_smooth_sat = torch.sum(tau_smooth_excess ** 2, dim=1, keepdim=True)
 
             w_rate    = float(self.rew_weights.get('action_rate',     -0.01))
             w_jerk    = float(self.rew_weights.get('action_jerk',     -0.005))
@@ -545,6 +596,7 @@ class RecoveryTask(NullTask):
             w_sat     = float(self.rew_weights.get('torque_sat_pen',  -0.01))
             w_normsq  = float(self.rew_weights.get('torque_norm_sq_pen', 0.0))
             w_excess  = float(self.rew_weights.get('torque_excess_pen', 0.0))
+            w_smooth  = float(self.rew_weights.get('torque_smooth_sat_pen', 0.0))
             components += [
                 w_rate    * act_rate,
                 w_jerk    * act_jerk,
@@ -553,13 +605,14 @@ class RecoveryTask(NullTask):
                 w_sat     * torque_sat,
                 w_normsq  * torque_norm_sq,
                 w_excess  * torque_excess,
+                w_smooth  * torque_smooth_sat,
             ]
             names += ['action_rate', 'action_jerk', 'joint_vel_pen',
                       'torque_pen', 'torque_sat', 'torque_norm_sq',
-                      'torque_excess']
+                      'torque_excess', 'torque_smooth_sat']
 
-        # ─── Layer 4: safety ──────────────────────────────────────────────
-        if LAYER_SAFETY in self._layers_enabled:
+        # ─── safety: joint-limit and contact-force penalties ─────────────
+        if GROUP_SAFETY in self._groups_enabled:
             # Joint position margin to limits (penalize approaching either side).
             jp = self.env.joint_pos
             margin_lo = (jp - self.joint_action_limit_low).clip(min=0., max=0.05)
@@ -580,7 +633,7 @@ class RecoveryTask(NullTask):
         # Continuous pose match against ref_joint_pos: penalizes "upright but
         # squatting" sinks where height/tilt are partially satisfied without
         # leg extension.
-        if LAYER_TERMINAL in self._layers_enabled:
+        if GROUP_TERMINAL in self._groups_enabled:
             terminal = (self.env.episode_length_buf >= self.env.max_episode_length - 1).unsqueeze(-1).float()
             ref_jp = self.ref_joint_action
             jp_err = torch.sum((self.env.joint_pos - ref_jp) ** 2, dim=1, keepdim=True)

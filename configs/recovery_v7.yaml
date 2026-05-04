@@ -1,0 +1,63 @@
+# Recovery v7 — anneal sustained-torque cost back into v6 without collapsing
+# the fallen-subset competence we just unlocked.
+#
+# Resumes from v6 iter 10000 (the 91% n=200 / 76% fallen / 56% prone peak).
+#
+# v6 observed costs:
+#   1. τpeak/eff_continuous = 2.74× sustained, max 5.97×. Sim hard-clips at
+#      URDF effort (peak rated ~2-3× continuous), but real motors will
+#      current-limit / thermal-trip on this duty cycle. Direct sim2real risk.
+#   2. High-frequency joint-target jitter even after standing — policy keeps
+#      micro-adjusting because no cost stops it.
+#   3. Stands up too fast (mean_time_to_upright = 0.67s) — pure burst, no
+#      time-smoothness cost.
+#
+# Two surgical changes:
+#   1. Re-enable torque_smooth_sat_pen at -0.005 (10× weaker than v3's -0.05).
+#      v3's weight was strong enough to *prevent* get-up entirely; -0.005
+#      should be small enough that the policy keeps the get-up motion but
+#      gets a steady gradient pulling sustained torque down. The penalty is
+#      Σ(τ - τ_max·tanh(τ/τ_max))² — accumulates over duty cycle, exactly
+#      the thing we want to bound.
+#   2. Strengthen action_jerk from -0.005 to -0.02 (4×). Action jerk is
+#      ‖a_t - 2·a_{t-1} + a_{t-2}‖² — penalizes high-frequency direction
+#      changes specifically. Targets the visible jitter without affecting
+#      slow-frequency motion (which is what get-up actually is).
+#
+# Not changed:
+#   - height / pose_match / orientation rewards (the things that made v6 work)
+#   - action_rate (already -0.02, sufficient)
+#   - everything in shaping_static
+#   - init pool, init_pd_target, episode_length, γ
+#
+# Expected trajectory:
+#   First 200 iter: m_kl spike, v_lss climbs (critic re-adjusts to new cost
+#   structure). Some success regression — likely to drop from 91% to 70-80%
+#   while τpeak compresses. If fallen subset (especially prone 56%) holds,
+#   we're winning.
+#   Later: τpeak/eff sustained should drop from 2.74× toward ≤1.5×, max
+#   from 5.97× toward ≤3×. Mean time-to-upright should creep up from 0.67s
+#   toward 1.5-2s as bursts get penalized.
+#
+# Failure criteria:
+#   - prone subset by_label drops below 30% → torque cost too aggressive,
+#     back off to -0.002
+#   - overall sim2sim falls below 70% sustained → same
+#
+# If v7 succeeds we have a deploy-ready ckpt: 80%+ recovery with sane torque.
+_base: recovery_v3.yaml
+
+reward:
+  # height term carry-over from v6 — the one that unlocked get-up
+  pose_match:    2.0
+  pose_match_k:  4.0
+  orientation:   1.0
+  orientation_k: 0.5
+  height:        2.0
+  height_k:      2.0
+  # smoothness — re-enable smooth-tanh sat at low weight, bump action_jerk
+  torque_smooth_sat_pen: -0.005   # was 0 in v6, was -0.05 in v3
+  action_rate:           -0.02
+  action_jerk:           -0.02    # was -0.005 (recovery.yaml default)
+  joint_vel_pen:         -0.001
+  torque_pen:            -0.0001

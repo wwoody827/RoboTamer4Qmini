@@ -1,0 +1,50 @@
+# Recovery v6 — fix the "fallen poses never recover" failure mode.
+#
+# Resumes from balance_v3 iter 4600 (same seed as recovery_v3), NOT from
+# v3 iter 9000. v3-v5 trained 5000+ iters and didn't learn get-up at all
+# (fallen 0% across all of them) — the inherited critic / network state
+# is biased toward the local optimum we want to escape, so restarting
+# from the balance seed gives the new reward shape a clean slate.
+#
+# Diagnosis from v5 by_label eval (n=200, mixed pool):
+#   balance:  100% success
+#   tilted:   86%  success
+#   fallen:    0%  success  (prone 0/27, supine 0/37, side 0/8)
+# All v3-v5 "breakthroughs" were balance+tilted+random eval noise. The policy
+# never learned get-up — fallen episodes end at z=0.17m, tilt=80°, basically
+# inert.
+#
+# Two fixes:
+#   1. Re-enable the original `height` reward (exp(-k_h·(z-target)²)) that
+#      was dropped when pose_match replaced it. Diagnosis was right then for
+#      the balance/tilted regime (PD-to-ref → z≈0.44m), but for fallen poses
+#      pose_match alone is *satisfied by lying flat with legs straight*, so
+#      nothing rewards the act of getting up. Adding height back closes the
+#      loop. k_h=2 → ~0.86 reward at z=0.17m (fallen) rising to 1.0 at 0.45m
+#      — gentle, monotone-ish in the relevant range.
+#   2. Disable torque_smooth_sat_pen (was -0.05). Get-up needs sustained
+#      high torque (push base up against gravity); -0.05·sum(τ_smooth_excess²)
+#      easily hits -50/step when commanding 2× rated, completely overwhelming
+#      the height reward. Torque is already clipped at the simulator and
+#      motor controller — the soft penalty just biases the policy toward
+#      "stay limp", which is exactly the failure mode here.
+#
+# Keeping v5's k=4, w=2 for pose_match — they help on balance/tilted (which
+# v6 must not regress) and don't harm fallen recovery (where pose_match is
+# saturated at 0 anyway from err=1).
+_base: recovery_v3.yaml
+
+reward:
+  # shaping_static — re-enable original height term alongside pose_match
+  pose_match:    2.0    # v3=1.0
+  pose_match_k:  4.0    # v3=8.0
+  orientation:   1.0
+  orientation_k: 0.5
+  height:        2.0    # NEW — was zero in v3-v5
+  height_k:      2.0    # exp(-2·(z-0.45)²): 0.86 at z=0.17, 1.0 at z=0.45
+  # smoothness — disable smooth-tanh sat penalty (the "stay limp" bias)
+  torque_smooth_sat_pen: 0.0
+  # other smoothness penalties stay (low weight, mostly harmless)
+  action_rate:       -0.02
+  joint_vel_pen:     -0.001
+  torque_pen:        -0.0001

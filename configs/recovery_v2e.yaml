@@ -17,9 +17,9 @@
 _base: recovery_v2c.yaml
 
 reward:
-  layers_enabled:
-    - layer1b_phase_shaped
-    - layer3_smoothness
+  groups_enabled:
+    - shaping_phased
+    - smoothness
     - terminal
   # Sharper Layer 3:
   action_rate:        -0.02

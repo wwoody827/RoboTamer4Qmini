@@ -25,9 +25,9 @@ domain_rand:
   # torque_range stays [0.8, 1.2] — change one thing at a time
 
 reward:
-  layers_enabled:
-    - layer1b_phase_shaped
-    - layer3_smoothness     # light regularizers, no sat penalty
+  groups_enabled:
+    - shaping_phased
+    - smoothness     # light regularizers, no sat penalty
     - terminal
   action_rate:        -0.02
   joint_vel_pen:      -0.001

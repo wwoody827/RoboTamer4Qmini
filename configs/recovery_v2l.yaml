@@ -29,9 +29,9 @@ action:
   action_lowpass_alpha: 0.3     # v2k=0.1 (too tight), v2g default=0.5 (too loose)
 
 reward:
-  layers_enabled:
-    - layer1b_phase_shaped
-    - layer3_smoothness
+  groups_enabled:
+    - shaping_phased
+    - smoothness
     - terminal
   # Layer 1b phase-shaped (from v2g):
   orient_w_early: 2.0

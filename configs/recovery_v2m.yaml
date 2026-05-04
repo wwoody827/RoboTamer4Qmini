@@ -30,9 +30,9 @@ algorithm:
   entropy_coef: 0.003
 
 reward:
-  layers_enabled:
-    - layer1b_phase_shaped
-    - layer3_smoothness
+  groups_enabled:
+    - shaping_phased
+    - smoothness
     - terminal
   orient_w_early: 2.0
   orient_w_late:  0.5

@@ -1,14 +1,14 @@
 # Fall-recovery policy — episodic, no command, no phase, 10-dim absolute action.
-# Phase A baseline: Layer 1 reward only (height + orientation).
-# To progress through Phases B/C/D, append entries to reward.layers_enabled.
+# Baseline: dense shaping (shaping_static) + terminal.
+# Compose orthogonal reward groups via reward.groups_enabled.
 _base: base.yaml
 
 task:
   cfg: Recovery
   init_states_path: data/recovery_init_states.npz
-  target_height: 0.45
-  target_height_ratio: 0.85       # success: z > 0.85 * target_height
-  success_tilt_deg: 25.0
+  target_height: 0.45             # informational only (PD-to-ref lands here)
+  success_pose_err: 0.3           # success: ||q - q_ref|| < this
+  success_tilt_deg: 25.0          # success: tilt < this
   # 4-stage curriculum: starts with near-nominal poses, advances on rolling success.
   curriculum:
     enabled: true
@@ -86,26 +86,26 @@ domain_rand:
   delay_observation: false         # Layer A keeps it simple; turn on later phases
   torque_noise_std: 1.0            # +per-step Nm noise; recovery loads gears hard
 
-# Reward layers gating — Phase A baseline: dense shaping (Layer 1) + sparse
-# terminal so the policy gets a gradient AND a clear ±5 success/failure signal.
+# Reward groups — baseline: dense shaping_static + sparse terminal so the
+# policy gets a continuous gradient AND a clear ±5 success/failure signal.
 reward:
-  layers_enabled:
-    - layer1_height_orient
+  groups_enabled:
+    - shaping_static
     - terminal
-  # Layer 1 weights + exp sharpness (smaller k = softer / wider gradient).
-  height: 1.0
-  height_k: 2.0          # exp(-k * (z - target)^2);  k=2 → ~0.7 at z=0
+  # shaping_static weights + exp sharpness (smaller k = softer / wider gradient).
+  pose_match: 1.0
+  pose_match_k: 8.0      # exp(-k * ||q - q_ref||^2); k=8 → ~0.5 at ||err||=0.3
   orientation: 1.0
-  orientation_k: 0.2     # exp(-k * tilt^2);  k=0.2 → ~0.14 at tilt=pi
-  # Layer 2 (gated by layers_enabled)
+  orientation_k: 0.5     # exp(-k * tilt^2); k=0.5 → ~0.85 at 25°
+  # stability (gated by groups_enabled)
   stability: 1.0
-  # Layer 3 (negative weights = penalties)
+  # smoothness (negative weights = penalties)
   action_rate:    -0.01
   action_jerk:    -0.005
   joint_vel_pen:  -0.0005
   torque_pen:     -0.0001
-  # Layer 4
+  # safety
   joint_limit:    1.0
   contact_force:  1.0
-  # Terminal: +w if upright at episode end, -w otherwise.
+  # terminal: +w if upright at episode end, -w otherwise.
   terminal:       5.0

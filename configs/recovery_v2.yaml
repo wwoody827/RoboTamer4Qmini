@@ -8,8 +8,8 @@ algorithm:
   entropy_coef: 0.003
 
 reward:
-  layers_enabled:
-    - layer1b_phase_shaped
+  groups_enabled:
+    - shaping_phased
     - terminal
   # Phase-shaped weights (linear interpolation over episode_progress):
   orient_w_early: 2.0           # turn-over emphasis early

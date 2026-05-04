@@ -33,33 +33,28 @@ from sim2sim import (
 )
 
 
-# Recovery obs slot builders. Layout from manifest obs_slots:
-#   base_euler (2) + base_ang_vel (3) + joint_pos_err (10) + joint_vel (10)
-#   + joint_tracking_err (10) + projected_gravity (3) + episode_progress (1) = 39
-def build_recovery_obs(data, current_joint_act, ref_joint_pos, episode_progress):
+# Recovery obs builder — slot-driven from manifest obs_slots so the layout
+# stays in sync with whatever recovery config produced the policy.
+def build_recovery_obs(data, current_joint_act, ref_joint_pos, episode_progress, obs_slots):
     quat_wxyz = data.qpos[3:7].copy()
-    euler = quat_to_euler_xyz(quat_wxyz)  # roll, pitch, yaw
+    euler = quat_to_euler_xyz(quat_wxyz)
     base_ang_vel = data.qvel[3:6].copy()
     q  = data.qpos[7:17].copy()
     qd = data.qvel[6:16].copy()
-    joint_pos_err = q - ref_joint_pos
-    joint_tracking_err = current_joint_act - q
-    # projected_gravity: gravity vector in body frame. world g = (0,0,-1).
-    # body frame conversion via quat conjugate. Reuse quat_rotate_inverse.
     from sim2sim import quat_rotate_inverse
     g_body = quat_rotate_inverse(quat_wxyz, np.array([0., 0., -1.], dtype=np.float32))
-    # NOTE: scaling matches env/obs_builder.py slot definitions:
-    #   base_ang_vel × 0.5, joint_vel × 0.1
-    obs = np.concatenate([
-        euler[:2].astype(np.float32),                  # 2  base_euler
-        (base_ang_vel * 0.5).astype(np.float32),       # 3  base_ang_vel × 0.5
-        joint_pos_err.astype(np.float32),              # 10 joint_pos_err
-        (qd * 0.1).astype(np.float32),                 # 10 joint_vel × 0.1
-        joint_tracking_err.astype(np.float32),         # 10 joint_tracking_err
-        g_body.astype(np.float32),                     # 3  projected_gravity
-        np.array([episode_progress], dtype=np.float32),# 1  episode_progress
-    ])
-    return obs
+    # Scaling matches env/obs_builder.py: base_ang_vel × 0.5, joint_vel × 0.1
+    by_name = {
+        'base_euler':         euler[:2].astype(np.float32),
+        'base_ang_vel':       (base_ang_vel * 0.5).astype(np.float32),
+        'joint_pos_err':      (q - ref_joint_pos).astype(np.float32),
+        'joint_vel':          (qd * 0.1).astype(np.float32),
+        'joint_tracking_err': (current_joint_act - q).astype(np.float32),
+        'projected_gravity':  g_body.astype(np.float32),
+        'episode_progress':   np.array([episode_progress], dtype=np.float32),
+        'joint_pos_abs':      q.astype(np.float32),
+    }
+    return np.concatenate([by_name[s] for s in obs_slots])
 
 
 def run_recovery_episode(model, data, session, input_name, cfg, init_state, seed=0):
@@ -76,12 +71,12 @@ def run_recovery_episode(model, data, session, input_name, cfg, init_state, seed
     jlim_low      = np.array(cfg['joint_limit_low'], dtype=np.float32)
     jlim_high     = np.array(cfg['joint_limit_high'], dtype=np.float32)
     lp_alpha      = float(cfg['action_lowpass_alpha'])
-    target_z      = cfg['target_height']
-    target_ratio  = cfg['target_height_ratio']
+    success_pose_err = float(cfg['success_pose_err'])
     tilt_deg      = cfg['success_tilt_deg']
     duration      = cfg['episode_length_s']
     obs_history   = cfg['obs_history']
     obs_per_step  = cfg['obs_per_step']
+    obs_slots     = cfg['obs_slots']
 
     # Reset to fallen pose
     mujoco.mj_resetData(model, data)
@@ -113,8 +108,8 @@ def run_recovery_episode(model, data, session, input_name, cfg, init_state, seed
     peak_ratio = 0.0
     sum_abs_tau = 0.0
     n_tau_samples = 0
-    success_z = target_z * target_ratio
     success_tilt_rad = np.deg2rad(tilt_deg)
+    pose_err_log = np.zeros(n_policy_steps + 1, dtype=np.float32)
 
     def _measure(idx):
         z_log[idx] = data.qpos[2]
@@ -127,14 +122,18 @@ def run_recovery_episode(model, data, session, input_name, cfg, init_state, seed
         cos_tilt = float(np.clip(-g_body[2], -1.0, 1.0))
         tilt = float(np.arccos(cos_tilt))
         tilt_log[idx] = np.rad2deg(tilt)
-        upright_log[idx] = (z_log[idx] > success_z) and (tilt < success_tilt_rad)
+        # Success = pose-match AND tilt-match (z still logged, but no longer gated).
+        pose_err = float(np.linalg.norm(data.qpos[7:17] - ref_joint_pos))
+        pose_err_log[idx] = pose_err
+        upright_log[idx] = (pose_err < success_pose_err) and (tilt < success_tilt_rad)
 
     _measure(0)
 
     for t in range(n_policy_steps):
         # Policy obs
         episode_progress = (t + 1) / n_policy_steps  # 0→1 over episode
-        obs_step = build_recovery_obs(data, current_joint_act, ref_joint_pos, episode_progress)
+        obs_step = build_recovery_obs(data, current_joint_act, ref_joint_pos,
+                                      episode_progress, obs_slots)
         # Shift history (newest at end)
         obs_hist = np.roll(obs_hist, -1, axis=0)
         obs_hist[-1] = obs_step
@@ -179,6 +178,7 @@ def run_recovery_episode(model, data, session, input_name, cfg, init_state, seed
         'ever_upright': ever_upright,
         'final_z': float(z_log[final_idx]),
         'final_tilt_deg': float(tilt_log[final_idx]),
+        'final_pose_err': float(pose_err_log[final_idx]),
         'time_to_upright_s': time_to_upright,
         'peak_tau_nm': peak_tau,
         'peak_tau_ratio': peak_ratio,
@@ -187,7 +187,7 @@ def run_recovery_episode(model, data, session, input_name, cfg, init_state, seed
     }
 
 
-def quick_eval_recovery(onnx_path, sim_cfg, manifest=None, runs=30, init_pool_path=None):
+def quick_eval_recovery(onnx_path, sim_cfg, manifest=None, runs=100, init_pool_path=None):
     """In-training recovery eval. Returns flat dict of TB-friendly scalar metrics.
     Used by train.py instead of the walking quick_eval when task_type='Recovery'.
 
@@ -211,15 +211,23 @@ def quick_eval_recovery(onnx_path, sim_cfg, manifest=None, runs=30, init_pool_pa
         'action_lowpass_alpha': sim_cfg['action_lowpass_alpha'],
         'obs_history':         sim_cfg['obs_history'],
         'obs_per_step':        sim_cfg['num_obs_per_step'],
+        'obs_slots':           sim_cfg['obs_slots'],
         'target_height':       float(rec.get('target_height', 0.45)),
-        'target_height_ratio': float(rec.get('target_height_ratio', 0.85)),
+        'success_pose_err':    float(rec.get('success_pose_err', 0.3)),
         'success_tilt_deg':    float(rec.get('success_tilt_deg', 25.0)),
         'episode_length_s':    float(rec.get('episode_length_s', 5.0)),
     }
 
-    # Default init pool: data/recovery_init_states.npz at repo root
+    # Pool resolution priority: explicit arg → manifest's recovery.init_states_path
+    # → data/recovery_init_states.npz fallback. The manifest path is what was
+    # used in training, so auto-eval evaluates on the SAME pool by default.
     if init_pool_path is None:
-        init_pool_path = os.path.join(os.path.dirname(_HERE), '..', 'data', 'recovery_init_states.npz')
+        repo_root = os.path.normpath(os.path.join(os.path.dirname(_HERE), '..'))
+        rec_path = rec.get('init_states_path') if isinstance(rec, dict) else None
+        if rec_path:
+            init_pool_path = rec_path if os.path.isabs(rec_path) else os.path.join(repo_root, rec_path)
+        else:
+            init_pool_path = os.path.join(repo_root, 'data', 'recovery_init_states.npz')
 
     model = build_mujoco_model(sim_cfg['urdf_path'], sim_cfg['simulation_dt'],
                                init_height=sim_cfg['init_height'],
@@ -251,6 +259,7 @@ def quick_eval_recovery(onnx_path, sim_cfg, manifest=None, runs=30, init_pool_pa
     ever_rate = sum(r['ever_upright'] for r in results) / n
     mean_z    = float(np.mean([r['final_z'] for r in results]))
     mean_tilt = float(np.mean([r['final_tilt_deg'] for r in results]))
+    mean_pose_err = float(np.mean([r['final_pose_err'] for r in results]))
     ttus = [r['time_to_upright_s'] for r in results if r['ever_upright']]
     mean_ttu = float(np.mean(ttus)) if ttus else float('nan')
     mean_peak_tau   = float(np.mean([r['peak_tau_nm']    for r in results]))
@@ -262,6 +271,7 @@ def quick_eval_recovery(onnx_path, sim_cfg, manifest=None, runs=30, init_pool_pa
         'sim2sim/recovery_success_rate': succ_rate,
         'sim2sim/recovery_ever_upright_rate': ever_rate,
         'sim2sim/recovery_mean_final_z': mean_z,
+        'sim2sim/recovery_mean_final_pose_err': mean_pose_err,
         'sim2sim/recovery_mean_final_tilt_deg': mean_tilt,
         'sim2sim/recovery_mean_time_to_upright_s': mean_ttu,
         'sim2sim/recovery_mean_peak_tau_nm':    mean_peak_tau,
@@ -307,15 +317,16 @@ def main():
         'action_lowpass_alpha': s2s_cfg['action_lowpass_alpha'],
         'obs_history':         s2s_cfg['obs_history'],
         'obs_per_step':        s2s_cfg['num_obs_per_step'],
+        'obs_slots':           s2s_cfg['obs_slots'],
         'target_height':       float(rec['target_height']),
-        'target_height_ratio': float(rec['target_height_ratio']),
+        'success_pose_err':    float(rec.get('success_pose_err', 0.3)),
         'success_tilt_deg':    float(rec['success_tilt_deg']),
         'episode_length_s':    float(rec['episode_length_s']),
     }
 
     print(f'[sim2sim_recovery] policy: {args.policy}')
     print(f'[sim2sim_recovery] manifest: {manifest_path}')
-    print(f'[sim2sim_recovery] success: z > {cfg["target_height"]*cfg["target_height_ratio"]:.3f}m '
+    print(f'[sim2sim_recovery] success: ||q-q_ref|| < {cfg["success_pose_err"]:.2f} '
           f'AND tilt < {cfg["success_tilt_deg"]:.1f}°  at t={cfg["episode_length_s"]}s')
 
     # Build model + ONNX
@@ -373,7 +384,9 @@ def main():
     print(f'  runs                  : {n}')
     print(f'  success_rate          : {succ:.2%}')
     print(f'  ever_upright_rate     : {ever:.2%}')
-    print(f'  mean_final_z          : {mean_z:.3f} m  (success threshold {cfg["target_height"]*cfg["target_height_ratio"]:.3f})')
+    mean_pose_err = float(np.mean([r['final_pose_err'] for r in results]))
+    print(f'  mean_final_z          : {mean_z:.3f} m  (informational; not gated)')
+    print(f'  mean_final_pose_err   : {mean_pose_err:.3f}    (success threshold {cfg["success_pose_err"]:.2f})')
     print(f'  mean_final_tilt       : {mean_tilt:.1f}° (success threshold {cfg["success_tilt_deg"]:.1f})')
     print(f'  mean_time_to_upright  : {mean_ttu:.2f} s  (over {len(ttus)} ever-upright runs)')
     print(f'  mean peak |τ|         : {mean_peak_tau:.1f} Nm   (worst-run peak: {max_peak_tau:.1f} Nm)')

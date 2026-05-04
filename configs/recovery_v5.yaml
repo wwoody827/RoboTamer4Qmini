@@ -1,0 +1,24 @@
+# Recovery v5 — resume from recovery_v3 iter 9000, wider+taller pose-match.
+#
+# v4 (pose_match_k=16) failed: 500 iter degraded all metrics (success 58→49%,
+# pose_err 0.89→1.11). Diagnosis: k=16 made gradient near err=1 essentially
+# zero — fallen poses lost their reward signal. v3 had been crawling forward
+# at err=0.7-0.9 *because* k=8 still gave a (weak) gradient there; k=16
+# killed even that.
+#
+# v5 corrects in the opposite direction: smaller k (wider field of view)
+# with bumped weight (compensate for the smaller per-sample reward).
+#
+# dR/derr = -2·w·k·err·exp(-k·err²) at the regime that mattered in v3:
+#   err=0.7 (where v3 stalled): k=8,w=1 → -0.22  ; k=4,w=2 → -1.58 (7× stronger)
+#   err=1.0 (deep fallen):      k=8,w=1 → -0.005 ; k=4,w=2 → -0.29 (53× stronger)
+#   err=0.3 (success boundary): k=8,w=1 → -2.34  ; k=4,w=2 → -1.67 (~30% weaker)
+#
+# Tradeoff: lose ~30% of boundary gradient, gain order-of-magnitude on the
+# fallen-pose region. With v3's evidence that the bottleneck is err>0.5,
+# this is the right reallocation.
+_base: recovery_v3.yaml
+
+reward:
+  pose_match:    2.0   # was 1.0
+  pose_match_k:  4.0   # was 8.0

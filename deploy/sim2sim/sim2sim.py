@@ -105,6 +105,7 @@ def manifest_to_sim2sim_cfg(manifest, policy_path):
         'joint_limit_high':   manifest['joint_limits']['high'],
         'num_obs_per_step':   manifest['obs_per_step'],
         'obs_history':        manifest['obs_history'],
+        'obs_slots':          manifest.get('obs_slots', []),
         'num_legs':           manifest['phase_modulator']['num_legs'],
         'static_cmd_threshold': manifest['phase_modulator'].get('static_cmd_threshold', 0.15),
         'action_mode':        manifest['action_mode'],

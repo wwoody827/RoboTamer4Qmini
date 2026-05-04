@@ -19,9 +19,9 @@ domain_rand:
   torque_range: [0.7, 1.0]
 
 reward:
-  layers_enabled:
-    - layer1b_phase_shaped
-    - layer3_smoothness     # was disabled in v2/v2c
+  groups_enabled:
+    - shaping_phased
+    - smoothness     # was disabled in v2/v2c
     - terminal
   # Tighter Layer 3 weights:
   action_rate:        -0.02     # ×2 vs default

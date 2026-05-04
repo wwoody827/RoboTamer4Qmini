@@ -1,0 +1,88 @@
+# Recovery v3 — Phase 2 of the two-stage curriculum. Resumes from balance_v1.
+#
+# Prerequisites (all enforced before launch):
+#   1. balance_v1 checkpoint exists with sim2sim ≥ 90% on the balance pool.
+#   2. data/recovery_init_states_mixed.npz built by:
+#        scripts/build_mixed_init_pool.py --total 5000 --ratio 30,30,40
+#      (1500 balance + 1500 tilted + 2000 fallen, shuffled)
+#
+# Why mixed instead of pure-fallen:
+#   v2k/v2l/v2m all showed pure-fallen init kills credit assignment.
+#   30/30/40 (Berkeley HumanPlus pattern) keeps 60% of episodes near
+#   upright so the balance skill stays fresh while the policy learns
+#   get-up on the fallen 40%. Curriculum bins by tilt/height-frac, so
+#   stage1 still drains the balance subset first; the fallen subset
+#   only gets prioritized once stages 2-3 unlock.
+#
+# Reward: shaping_static (same shape as balance_v1, just from a harder init
+# distribution). We dropped shaping_phased because the policy can't observe
+# episode_progress — phased weights would force the policy to behave
+# differently early vs late without a way to distinguish them, leading to
+# averaging or fragile inference via tilt-as-progress proxy.
+# Layer 3 uses torque_smooth_sat_pen (gradient through MuJoCo clip) instead
+# of torque_norm_sq_pen (gradient zero past the clip — what trapped v2c).
+_base: recovery.yaml
+
+task:
+  init_states_path: data/recovery_init_states_mixed.npz
+  init_pd_target: ref               # consistency with balance_v1
+  curriculum:
+    enabled: true
+    replay_old_frac: 0.20
+
+action:
+  action_lowpass_alpha: 0.3         # match balance_v1 — no surprise on resume
+
+observation:
+  # Drop episode_progress — sim-only signal, no analogue at deploy time.
+  # shaping_phased reward reads progress directly from episode_length_buf.
+  history: 1
+  slots:
+    - base_euler                   # 2
+    - base_ang_vel                 # 3
+    - joint_pos_err                # 10
+    - joint_vel                    # 10
+    - joint_tracking_err           # 10
+    - projected_gravity            # 3
+                                    # total: 38
+
+runner:
+  # 5s → 8s. Fall→get-up→stabilize takes ~3-5s real-time; 5s gave the policy
+  # no buffer for trial+error. ANYmal Lee 2020 / HumanPlus / OmniH2O all use
+  # 8-10s for recovery.
+  episode_length_s: 8
+
+algorithm:
+  entropy_coef: 0.003
+  # 0.99 → 0.995. With dt=0.015s, γ=0.99 makes the terminal at t=8s worth 0.4%
+  # of its undiscounted value — policy effectively can't see it. γ=0.995 keeps
+  # the terminal at ~7% weight at 8s, so "endure now for terminal +5" works.
+  discount_factor: 0.995
+
+reward:
+  groups_enabled:
+    - shaping_static
+    - stability
+    - smoothness
+    - terminal
+  # shaping_static — same shape as balance_v1, applied uniformly across the
+  # episode. With a harder init distribution (mixed pool), tilt is high at
+  # episode start and (ideally) low by end; the orientation term naturally
+  # dominates early and pose-match dominates late without explicit phasing.
+  pose_match:    1.0
+  pose_match_k:  8.0
+  orientation:   1.0
+  orientation_k: 0.5
+  # stability — bonus when actually upright AND pose-matched (gated inside
+  # _is_upright). Provides a clear target signal for fallen-pose recovery.
+  stability:     2.0
+  # terminal — sparse ±5 + pose-match shaping at episode end.
+  terminal:        5.0
+  terminal_pose_k: 1.0
+  # smoothness — smooth-tanh saturation replaces norm_sq (key fix vs v2g)
+  action_rate:           -0.02
+  joint_vel_pen:         -0.001
+  torque_pen:            -0.0001
+  torque_sat_pen:         0.0
+  torque_norm_sq_pen:     0.0
+  torque_smooth_sat_pen: -0.05
