@@ -91,7 +91,7 @@ def play(args):
     task = load_task_cls(cfg.task.cfg)(env)
     gym_env = GymEnvWrapper(env, task, debug=args.debug)
     pure_obs_len = len(gym_env.task.pure_observation()[0])
-    stack_obs_len = gym_env.task.obs_history.maxlen
+    stack_obs_len = gym_env.task._obs_history_n
     task.num_observations = pure_obs_len * stack_obs_len
     task.num_actions = len(gym_env.task.action_low)
 

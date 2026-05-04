@@ -50,6 +50,7 @@ def run_one_episode(model, data, session, input_name, cfg, init_state,
     success_tilt_rad = np.deg2rad(cfg['success_tilt_deg'])
     duration      = cfg['episode_length_s']
     obs_history   = cfg['obs_history']
+    obs_skip      = cfg.get('obs_skip', 1)
     obs_per_step  = cfg['obs_per_step']
     obs_slots     = cfg['obs_slots']
 
@@ -64,7 +65,8 @@ def run_one_episode(model, data, session, input_name, cfg, init_state,
 
     current_joint_act = data.qpos[7:17].copy().astype(np.float32)
     lp_target = current_joint_act.copy()
-    obs_hist = np.zeros((obs_history, obs_per_step), dtype=np.float32)
+    _buf_len = (obs_history - 1) * obs_skip + 1
+    obs_buf = np.zeros((_buf_len, obs_per_step), dtype=np.float32)
     n_policy_steps = int(duration / (sim_dt * decimation))
 
     cam = None
@@ -83,9 +85,10 @@ def run_one_episode(model, data, session, input_name, cfg, init_state,
         episode_progress = (t + 1) / n_policy_steps
         obs_step = build_recovery_obs(data, current_joint_act, ref_joint_pos,
                                       episode_progress, obs_slots)
-        obs_hist = np.roll(obs_hist, -1, axis=0)
-        obs_hist[-1] = obs_step
-        obs_flat = obs_hist.reshape(1, -1).astype(np.float32)
+        obs_buf = np.roll(obs_buf, -1, axis=0)
+        obs_buf[-1] = obs_step
+        _idx = [i * obs_skip for i in range(obs_history)]
+        obs_flat = obs_buf[_idx].reshape(1, -1).astype(np.float32)
 
         mu = session.run(None, {input_name: obs_flat})[0][0]
         target = scale_transform(mu, abs_low, abs_high, clip_val=1.0)
@@ -168,6 +171,7 @@ def main():
         'joint_limit_high':    s2s_cfg['joint_limit_high'],
         'action_lowpass_alpha': s2s_cfg['action_lowpass_alpha'],
         'obs_history':         s2s_cfg['obs_history'],
+        'obs_skip':            s2s_cfg.get('obs_skip', 1),
         'obs_per_step':        s2s_cfg['num_obs_per_step'],
         'obs_slots':           s2s_cfg['obs_slots'],
         'target_height':       float(rec['target_height']),

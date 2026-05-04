@@ -75,6 +75,7 @@ def run_recovery_episode(model, data, session, input_name, cfg, init_state, seed
     tilt_deg      = cfg['success_tilt_deg']
     duration      = cfg['episode_length_s']
     obs_history   = cfg['obs_history']
+    obs_skip      = cfg.get('obs_skip', 1)
     obs_per_step  = cfg['obs_per_step']
     obs_slots     = cfg['obs_slots']
 
@@ -90,7 +91,8 @@ def run_recovery_episode(model, data, session, input_name, cfg, init_state, seed
 
     current_joint_act = data.qpos[7:17].copy().astype(np.float32)
     lp_target = current_joint_act.copy()
-    obs_hist = np.zeros((obs_history, obs_per_step), dtype=np.float32)
+    _buf_len = (obs_history - 1) * obs_skip + 1
+    obs_buf = np.zeros((_buf_len, obs_per_step), dtype=np.float32)
 
     # Track upright at every policy step
     n_policy_steps = int(duration / (sim_dt * decimation))
@@ -110,6 +112,8 @@ def run_recovery_episode(model, data, session, input_name, cfg, init_state, seed
     n_tau_samples = 0
     success_tilt_rad = np.deg2rad(tilt_deg)
     pose_err_log = np.zeros(n_policy_steps + 1, dtype=np.float32)
+    # Per-policy-step action log for jerk metric: ‖a_t - 2·a_{t-1} + a_{t-2}‖²
+    actions_log = np.zeros((n_policy_steps, 10), dtype=np.float32)
 
     def _measure(idx):
         z_log[idx] = data.qpos[2]
@@ -134,13 +138,15 @@ def run_recovery_episode(model, data, session, input_name, cfg, init_state, seed
         episode_progress = (t + 1) / n_policy_steps  # 0→1 over episode
         obs_step = build_recovery_obs(data, current_joint_act, ref_joint_pos,
                                       episode_progress, obs_slots)
-        # Shift history (newest at end)
-        obs_hist = np.roll(obs_hist, -1, axis=0)
-        obs_hist[-1] = obs_step
-        obs_flat = obs_hist.reshape(1, -1).astype(np.float32)
+        # Shift buffer (newest at end), then sample N frames at stride K
+        obs_buf = np.roll(obs_buf, -1, axis=0)
+        obs_buf[-1] = obs_step
+        _idx = [i * obs_skip for i in range(obs_history)]
+        obs_flat = obs_buf[_idx].reshape(1, -1).astype(np.float32)
 
         # Policy forward
         mu = session.run(None, {input_name: obs_flat})[0][0]  # 10-dim
+        actions_log[t] = mu
         # Absolute mode: scale mu in [-1,1] to [abs_low, abs_high]
         target = scale_transform(mu, abs_low, abs_high, clip_val=1.0)
         # Low-pass
@@ -170,7 +176,27 @@ def run_recovery_episode(model, data, session, input_name, cfg, init_state, seed
         first_upright_step = int(np.argmax(upright_log))  # first True
         time_to_upright = first_upright_step * sim_dt * decimation
     else:
+        first_upright_step = None
         time_to_upright = float('nan')
+
+    # Action jerk: ‖a_t - 2·a_{t-1} + a_{t-2}‖² averaged across policy steps.
+    # Captures high-frequency direction changes — slow motions don't penalize.
+    A = actions_log
+    if A.shape[0] >= 3:
+        jerk = A[2:] - 2.0 * A[1:-1] + A[:-2]      # [T-2, 10]
+        jerk_per_step_sq = (jerk ** 2).sum(axis=1)  # [T-2]
+        action_jerk_rms = float(np.sqrt(jerk_per_step_sq.mean()))
+        # Post-upright jerk: same metric but only over steps after first upright,
+        # i.e. captures "policy keeps micro-adjusting after standing."
+        if first_upright_step is not None and first_upright_step + 2 < A.shape[0]:
+            post_idx = max(first_upright_step - 2, 0)  # align with jerk[t]=A[t+2]-2A[t+1]+A[t]
+            post_jerk = jerk_per_step_sq[post_idx:]
+            post_upright_jerk_rms = float(np.sqrt(post_jerk.mean())) if post_jerk.size else float('nan')
+        else:
+            post_upright_jerk_rms = float('nan')
+    else:
+        action_jerk_rms = float('nan')
+        post_upright_jerk_rms = float('nan')
 
     mean_abs_tau = sum_abs_tau / max(n_tau_samples, 1)
     return {
@@ -183,6 +209,8 @@ def run_recovery_episode(model, data, session, input_name, cfg, init_state, seed
         'peak_tau_nm': peak_tau,
         'peak_tau_ratio': peak_ratio,
         'mean_abs_tau_nm': mean_abs_tau,
+        'action_jerk_rms': action_jerk_rms,
+        'post_upright_jerk_rms': post_upright_jerk_rms,
         'pose_label': str(init_state.get('pose_label', '?')),
     }
 
@@ -210,6 +238,7 @@ def quick_eval_recovery(onnx_path, sim_cfg, manifest=None, runs=100, init_pool_p
         'joint_limit_high':    sim_cfg['joint_limit_high'],
         'action_lowpass_alpha': sim_cfg['action_lowpass_alpha'],
         'obs_history':         sim_cfg['obs_history'],
+        'obs_skip':            sim_cfg.get('obs_skip', 1),
         'obs_per_step':        sim_cfg['num_obs_per_step'],
         'obs_slots':           sim_cfg['obs_slots'],
         'target_height':       float(rec.get('target_height', 0.45)),
@@ -266,6 +295,9 @@ def quick_eval_recovery(onnx_path, sim_cfg, manifest=None, runs=100, init_pool_p
     mean_avg_tau    = float(np.mean([r['mean_abs_tau_nm'] for r in results]))
     mean_peak_ratio = float(np.mean([r['peak_tau_ratio'] for r in results]))
     max_peak_ratio  = float(np.max ([r['peak_tau_ratio'] for r in results]))
+    mean_jerk_rms   = float(np.mean([r['action_jerk_rms'] for r in results]))
+    post_jerks      = [r['post_upright_jerk_rms'] for r in results if not np.isnan(r['post_upright_jerk_rms'])]
+    mean_post_jerk  = float(np.mean(post_jerks)) if post_jerks else float('nan')
 
     return {
         'sim2sim/recovery_success_rate': succ_rate,
@@ -278,6 +310,8 @@ def quick_eval_recovery(onnx_path, sim_cfg, manifest=None, runs=100, init_pool_p
         'sim2sim/recovery_mean_abs_tau_nm':     mean_avg_tau,
         'sim2sim/recovery_mean_peak_tau_ratio': mean_peak_ratio,
         'sim2sim/recovery_max_peak_tau_ratio':  max_peak_ratio,
+        'sim2sim/recovery_action_jerk_rms':       mean_jerk_rms,
+        'sim2sim/recovery_post_upright_jerk_rms': mean_post_jerk,
     }
 
 
@@ -316,6 +350,7 @@ def main():
         'joint_limit_high':    s2s_cfg['joint_limit_high'],
         'action_lowpass_alpha': s2s_cfg['action_lowpass_alpha'],
         'obs_history':         s2s_cfg['obs_history'],
+        'obs_skip':            s2s_cfg.get('obs_skip', 1),
         'obs_per_step':        s2s_cfg['num_obs_per_step'],
         'obs_slots':           s2s_cfg['obs_slots'],
         'target_height':       float(rec['target_height']),
@@ -378,6 +413,9 @@ def main():
     mean_avg_tau    = float(np.mean([r['mean_abs_tau_nm'] for r in results]))
     mean_peak_ratio = float(np.mean([r['peak_tau_ratio'] for r in results]))
     max_peak_ratio  = float(np.max ([r['peak_tau_ratio'] for r in results]))
+    mean_jerk_rms   = float(np.mean([r['action_jerk_rms'] for r in results]))
+    post_jerks      = [r['post_upright_jerk_rms'] for r in results if not np.isnan(r['post_upright_jerk_rms'])]
+    mean_post_jerk  = float(np.mean(post_jerks)) if post_jerks else float('nan')
 
     print()
     print('=== Recovery sim2sim results ===')
@@ -394,6 +432,7 @@ def main():
     print(f'  mean peak |τ|/effort  : {mean_peak_ratio:.2f}×   (worst-run: {max_peak_ratio:.2f}×)')
     print(f'    >1.0 means policy is requesting more than the motor can deliver,')
     print(f'    sim is silently clipping for it, real robot will saturate.')
+    print(f'  action_jerk_rms       : {mean_jerk_rms:.4f}   (post-upright: {mean_post_jerk:.4f})')
 
     if args.by_label:
         from collections import defaultdict

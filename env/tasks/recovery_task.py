@@ -29,27 +29,29 @@ from isaacgym.torch_utils import to_torch, torch_rand_float
 
 from env.legged_robot import LeggedRobotEnv
 from env.tasks.null_task import NullTask, register
-from env.obs_builder import ObsBuilder, obs_slot
+from env.obs_builder import ObsBuilder, obs_slot, mirror_signs, mirror_swap_negate
 from env.recovery_curriculum import RecoveryCurriculum
 
 
 # Recovery-specific obs slots (registered globally; only consumed if listed
 # in observation.slots).
 
-@obs_slot('projected_gravity', dim=3)
+@obs_slot('projected_gravity', dim=3, mirror=mirror_signs([1, -1, 1]))
 def _projected_gravity(task):
     """Gravity vector projected into body frame. Encodes orientation directly:
-    upright → ~[0, 0, -1]; lying on back → [0, 0, +1]; on a side → [0, ±1, 0]."""
+    upright → ~[0, 0, -1]; lying on back → [0, 0, +1]; on a side → [0, ±1, 0].
+    Under L↔R reflection: gx id, gy negate, gz id.
+    """
     return task.env.projected_gravity
 
 
-@obs_slot('episode_progress', dim=1)
+@obs_slot('episode_progress', dim=1, mirror=mirror_signs([1]))
 def _episode_progress(task):
-    """0 → 1 over the episode horizon. Lets the policy plan the terminal phase."""
+    """0 → 1 over the episode horizon. Scalar — identity under L↔R."""
     return (task.env.episode_length_buf.float() / max(task.env.max_episode_length, 1)).unsqueeze(-1)
 
 
-@obs_slot('joint_pos_abs', dim=10)
+@obs_slot('joint_pos_abs', dim=10, mirror=mirror_swap_negate(10))
 def _joint_pos_abs(task):
     """Absolute joint positions (no nominal subtraction). Useful for recovery
     where the *current* angle matters more than the offset from a stand pose."""
@@ -199,8 +201,15 @@ class RecoveryTask(NullTask):
         # ─── Obs builder ───────────────────────────────────────────────────
         obs_cfg = self.cfg.observation
         obs_history_len = obs_cfg.history if obs_cfg is not None and obs_cfg.history is not None else 1
-        self.obs_history = deque(maxlen=obs_history_len)
-        self.cri_obs_history = deque(maxlen=obs_history_len)
+        obs_skip = getattr(obs_cfg, 'skip', None) if obs_cfg is not None else None
+        if obs_skip is None or obs_skip < 1:
+            obs_skip = 1
+        # Buffer holds the raw rolling window; policy sees N frames at stride K.
+        self._obs_history_n = obs_history_len
+        self._obs_skip = obs_skip
+        buf_len = (obs_history_len - 1) * obs_skip + 1
+        self.obs_history = deque(maxlen=buf_len)
+        self.cri_obs_history = deque(maxlen=buf_len)
 
         if obs_cfg is None or obs_cfg.slots is None:
             raise ValueError("RecoveryTask requires explicit observation.slots in config")
@@ -394,12 +403,16 @@ class RecoveryTask(NullTask):
     def observation(self):
         self.obs_buf_pure = self.pure_observation()
         self.obs_history.append(self.obs_buf_pure)
-        return torch.cat(list(self.obs_history), dim=-1)
+        buf = list(self.obs_history)
+        idx = [i * self._obs_skip for i in range(self._obs_history_n)]
+        return torch.cat([buf[i] for i in idx], dim=-1)
 
     def critic_observation(self):
         cri = self.pure_critic_observation()
         self.cri_obs_history.append(cri)
-        return torch.cat(list(self.cri_obs_history), dim=-1)
+        buf = list(self.cri_obs_history)
+        idx = [i * self._obs_skip for i in range(self._obs_history_n)]
+        return torch.cat([buf[i] for i in idx], dim=-1)
 
     # ──────────────────────────────────────────────────────────────────────
     # Termination / reward

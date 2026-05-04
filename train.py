@@ -12,7 +12,7 @@ from collections import deque
 import collections
 import statistics
 from utils.common import clear_dir
-from utils.mirror import BIRLMirror, BDXMirror
+from utils.mirror import BIRLMirror, BDXMirror, Mirror
 from config.loader import load_config, CfgNode, config_to_dict, save_config
 from deploy.manifest import build_manifest, save_manifest
 from isaacgym.torch_utils import *
@@ -69,7 +69,7 @@ def train():
                          fix_cam=args.fix_cam)
     task = load_task_cls(cfg.task.cfg)(env)
     gym_env = GymEnvWrapper(env, task)
-    task.num_observations = len(gym_env.task.pure_observation()[0]) * gym_env.task.obs_history.maxlen
+    task.num_observations = len(gym_env.task.pure_observation()[0]) * gym_env.task._obs_history_n
     task.num_actions = len(gym_env.task.action_low)
 
     # Build cfg_dict for saving
@@ -114,11 +114,16 @@ def train():
     _use_mirror = getattr(cfg.runner, 'use_mirror_augmentation', False)
     _mirror_weight = getattr(cfg.runner, 'mirror_weight', 0.5)
     if _use_mirror:
-        if _phase_mode == 'output':
-            _mirror = BIRLMirror(obs_history=3, device=device)
-        else:
-            _mirror = BDXMirror(obs_history=3, device=device)
-        print(f'[mirror] L↔R symmetry augmentation enabled (weight={_mirror_weight}, {_mirror.__class__.__name__})')
+        _slots = list(cfg.observation.slots) if cfg.observation is not None and cfg.observation.slots else []
+        _mirror = Mirror(
+            obs_slots=_slots,
+            obs_history=task._obs_history_n,
+            action_dim=task.num_actions,
+            device=device,
+        )
+        print(f'[mirror] generic L↔R augmentation enabled '
+              f'(weight={_mirror_weight}, slots={len(_slots)}, '
+              f'history={task._obs_history_n}, action_dim={task.num_actions})')
     else:
         _mirror = None
     if args.resume is not None:
@@ -233,8 +238,11 @@ def train():
                           f'pose_err={_metrics.get("sim2sim/recovery_mean_final_pose_err", float("nan")):.3f}  '
                           f'tilt={_metrics.get("sim2sim/recovery_mean_final_tilt_deg", float("nan")):.1f}°  '
                           f'z={_metrics.get("sim2sim/recovery_mean_final_z", float("nan")):.3f}m  '
+                          f'ttu={_metrics.get("sim2sim/recovery_mean_time_to_upright_s", float("nan")):.2f}s  '
                           f'τpeak/eff={_metrics.get("sim2sim/recovery_mean_peak_tau_ratio", float("nan")):.2f}×'
                           f'(max {_metrics.get("sim2sim/recovery_max_peak_tau_ratio", float("nan")):.2f}×)  '
+                          f'jerk={_metrics.get("sim2sim/recovery_action_jerk_rms", float("nan")):.4f}'
+                          f'(post={_metrics.get("sim2sim/recovery_post_upright_jerk_rms", float("nan")):.4f})  '
                           f'({_elapsed:.0f}s)')
                 else:
                     _surv_str = '  '.join(

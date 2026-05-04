@@ -105,6 +105,7 @@ def manifest_to_sim2sim_cfg(manifest, policy_path):
         'joint_limit_high':   manifest['joint_limits']['high'],
         'num_obs_per_step':   manifest['obs_per_step'],
         'obs_history':        manifest['obs_history'],
+        'obs_skip':           manifest.get('obs_skip', 1),
         'obs_slots':          manifest.get('obs_slots', []),
         'num_legs':           manifest['phase_modulator']['num_legs'],
         'static_cmd_threshold': manifest['phase_modulator'].get('static_cmd_threshold', 0.15),
@@ -459,6 +460,7 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, cmd_freq=None, duration=Non
     jlim_high   = cfg['joint_limit_high']
     num_legs    = cfg['num_legs']
     obs_hist    = cfg['obs_history']
+    obs_skip    = cfg.get('obs_skip', 1)
     obs_dim     = cfg['num_obs_per_step']
     static_thr  = cfg['static_cmd_threshold']
 
@@ -564,8 +566,9 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, cmd_freq=None, duration=Non
     lp_target = ref_joint.copy()  # lowpass state for absolute mode
 
     current_joint_act = ref_joint.copy()
-    obs_history = deque(maxlen=obs_hist)
-    for _ in range(obs_hist):
+    _buf_len = (obs_hist - 1) * obs_skip + 1
+    obs_history = deque(maxlen=_buf_len)
+    for _ in range(_buf_len):
         obs_history.append(np.zeros(obs_dim, dtype=np.float32))
 
     def _get_imu_state():
@@ -741,7 +744,9 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, cmd_freq=None, duration=Non
                 else:
                     obs_now = get_obs()
                 obs_history.append(obs_now)
-                obs_stacked = np.concatenate(list(obs_history))[np.newaxis, :]
+                _buf = list(obs_history)
+                _idx = [i * obs_skip for i in range(obs_hist)]
+                obs_stacked = np.concatenate([_buf[i] for i in _idx])[np.newaxis, :]
 
                 net_out = session.run(None, {input_name: obs_stacked})[0][0]
                 scaled = scale_transform(net_out, act_low, act_high)

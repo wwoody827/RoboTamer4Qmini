@@ -148,6 +148,7 @@ class _Policy:
                                              providers=['CPUExecutionProvider'])
         self.input_name = self.session.get_inputs()[0].name
         self.obs_history = int(self.manifest['obs_history'])
+        self.obs_skip = int(self.manifest.get('obs_skip', 1))
         self.obs_per_step = int(self.manifest['obs_per_step'])
         self.obs_total = int(self.manifest['obs_total'])
         self.action_dim = int(self.manifest['action_dim'])
@@ -163,7 +164,8 @@ class _Policy:
             self.act_low = np.array(scaling['inc_low'], dtype=np.float32)
             self.act_high = np.array(scaling['inc_high'], dtype=np.float32)
         self.ref_joint_pos = np.array(self.manifest['ref_joint_pos'], dtype=np.float32)
-        self.obs_history_buf = deque(maxlen=self.obs_history)
+        self._buf_len = (self.obs_history - 1) * self.obs_skip + 1
+        self.obs_history_buf = deque(maxlen=self._buf_len)
         self.lp_target = self.ref_joint_pos.copy()
         self.last_target = self.ref_joint_pos.copy()
         self.episode_step = 0
@@ -179,11 +181,13 @@ class _Policy:
 
     def predict(self, obs_per_step):
         if len(self.obs_history_buf) == 0:
-            for _ in range(self.obs_history):
+            for _ in range(self._buf_len):
                 self.obs_history_buf.append(obs_per_step.copy())
         else:
             self.obs_history_buf.append(obs_per_step)
-        obs = np.concatenate(list(self.obs_history_buf), axis=0).astype(np.float32)
+        buf = list(self.obs_history_buf)
+        idx = [i * self.obs_skip for i in range(self.obs_history)]
+        obs = np.concatenate([buf[i] for i in idx], axis=0).astype(np.float32)
         out = self.session.run(None, {self.input_name: obs[None, :]})[0][0]
         return out  # raw net out [action_dim]
 

@@ -23,6 +23,7 @@ phase:
 # Total obs = len(slots_per_step) × obs_history. See env/obs_builder.py for slot defs.
 observation:
   history: 3
+  skip: 1                # frame stride: policy sees N frames at stride K (buffer length = (N-1)*K+1, K=1 = consecutive)
   slots:
     - commands_3
     - base_euler

@@ -23,6 +23,7 @@ def build_manifest(params):
     obs_cfg = params.get('observation', {})
     phase_cfg = params.get('phase', {})
     obs_history = obs_cfg.get('history', 3) if obs_cfg else 3
+    obs_skip = obs_cfg.get('skip', 1) if obs_cfg else 1
     obs_per_step = policy_cfg.get('num_observations', 0) // obs_history
     phase_mode = phase_cfg.get('mode', 'output') if phase_cfg else 'output'
 
@@ -33,6 +34,7 @@ def build_manifest(params):
         'task_type': task_cfg.get('cfg', 'BIRL'),
         'obs_per_step': obs_per_step,
         'obs_history': obs_history,
+        'obs_skip': obs_skip,
         'obs_slots': obs_cfg.get('slots') if obs_cfg else None,
         'obs_total': policy_cfg.get('num_observations', 0),
         'action_dim': policy_cfg.get('num_actions', 0),

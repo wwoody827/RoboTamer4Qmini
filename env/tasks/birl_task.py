@@ -156,8 +156,14 @@ class BIRLTask(NullTask):
 
         obs_cfg = self.cfg.observation
         obs_history_len = obs_cfg.history if obs_cfg is not None and obs_cfg.history is not None else 3
-        self.obs_history = deque(maxlen=obs_history_len)
-        self.cri_obs_history = deque(maxlen=obs_history_len)
+        obs_skip = getattr(obs_cfg, 'skip', None) if obs_cfg is not None else None
+        if obs_skip is None or obs_skip < 1:
+            obs_skip = 1
+        self._obs_history_n = obs_history_len
+        self._obs_skip = obs_skip
+        buf_len = (obs_history_len - 1) * obs_skip + 1
+        self.obs_history = deque(maxlen=buf_len)
+        self.cri_obs_history = deque(maxlen=buf_len)
 
         # Build obs from config slots (falls back to hardcoded if no config)
         if obs_cfg is not None and obs_cfg.slots is not None:
@@ -517,12 +523,16 @@ class BIRLTask(NullTask):
     def observation(self):
         self.obs_buf_pure = self.pure_observation()
         self.obs_history.append(self.obs_buf_pure)
-        return  torch.cat([obs for obs in self.obs_history], dim=-1)
+        buf = list(self.obs_history)
+        idx = [i * self._obs_skip for i in range(self._obs_history_n)]
+        return torch.cat([buf[i] for i in idx], dim=-1)
 
     def critic_observation(self):
         pure_obs_buf = self.pure_critic_observation()
         self.cri_obs_history.append(pure_obs_buf)
-        return  torch.cat([obs for obs in self.cri_obs_history], dim=-1)
+        buf = list(self.cri_obs_history)
+        idx = [i * self._obs_skip for i in range(self._obs_history_n)]
+        return torch.cat([buf[i] for i in idx], dim=-1)
 
     def pure_critic_observation(self):
         _jo = self.num_legs if self._phase_mode == 'output' else 0  # joint offset in net_out
