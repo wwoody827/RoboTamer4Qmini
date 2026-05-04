@@ -27,7 +27,10 @@ task:
   init_states_path: data/recovery_init_states_mixed.npz
   init_pd_target: ref               # consistency with balance_v1
   curriculum:
-    enabled: true
+    # Disabled — with balance-seeded resume, all 4 stages advance within
+    # ~10 iters (rolling rollout success in Isaac passes immediately even
+    # when sim2sim says 38%). It's effectively a no-op on the mixed pool.
+    enabled: false
     replay_old_frac: 0.20
 
 action:

@@ -1,0 +1,34 @@
+# Recovery v8 — fresh start from balance_v3 with v7 reward shape +
+# action_jerk/post_upright_jerk metrics.
+#
+# Why fresh from balance: with v7's reward shape applied to v6 iter 10000,
+# the policy already had bursty/jittery habits from v6 training. v8 gives
+# the smooth_sat + jerk costs a clean slate, like v6 did when seeded from
+# balance.
+#
+# Reward shape identical to v7:
+#   torque_smooth_sat_pen = -0.005    (vs 0 in v6, -0.05 in v3 [too strong])
+#   action_jerk           = -0.02     (vs -0.005 default; 4× stronger)
+# height/pose/orientation kept (the v6 unlocks).
+#
+# Baseline jerk numbers (sim2sim_recovery, 50 runs each):
+#   balance_v3 @4500 on balance pool : action_jerk_rms = 0.61
+#   recovery_v6 @10000 on mixed pool : action_jerk_rms = 5.69 (post_upright = 6.18)
+# → recovery training drives 9× jerk increase. v8 measures whether
+#   the explicit jerk reward (-0.02) bends this back toward the balance baseline.
+#
+# Resume: balance_v3 iter 4600 (the v6 seed). NOT from recovery_v6/v7.
+_base: recovery/recovery_v3.yaml
+
+reward:
+  pose_match:    2.0
+  pose_match_k:  4.0
+  orientation:   1.0
+  orientation_k: 0.5
+  height:        2.0
+  height_k:      2.0
+  torque_smooth_sat_pen: -0.005
+  action_rate:           -0.02
+  action_jerk:           -0.02
+  joint_vel_pen:         -0.001
+  torque_pen:            -0.0001

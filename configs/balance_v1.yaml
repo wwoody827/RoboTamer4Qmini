@@ -23,7 +23,7 @@
 #
 # Success gate before launching Phase 2 (recovery_v3):
 #   sim2sim ≥ 90%, |τ_peak| / τ_rated ≤ 1.5×, upright_frac ≥ 93%.
-_base: recovery.yaml
+_base: recovery/recovery.yaml
 
 task:
   init_states_path: data/balance_init_states.npz
