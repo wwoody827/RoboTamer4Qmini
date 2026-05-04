@@ -15,3 +15,10 @@ IsaacGym_Preview_3_Package.tar.gz
 # Backups / runtime dumps
 *.bak
 MUJOCO_LOG.TXT
+
+# Claude Code session state
+.claude/
+
+# Recovery viz output
+recovery_*_videos/
+*.mp4
