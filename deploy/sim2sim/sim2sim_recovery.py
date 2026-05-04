@@ -114,6 +114,30 @@ def run_recovery_episode(model, data, session, input_name, cfg, init_state, seed
     pose_err_log = np.zeros(n_policy_steps + 1, dtype=np.float32)
     # Per-policy-step action log for jerk metric: ‖a_t - 2·a_{t-1} + a_{t-2}‖²
     actions_log = np.zeros((n_policy_steps, 10), dtype=np.float32)
+    # Foot contact-force tracking for "hard landing" diagnostics:
+    #   max_foot_frc_n      = peak |F| at either foot, in Newtons
+    #   max_foot_frc_rate   = peak |dF/dt| (force build-up rate), in N/s. A slam
+    #                         shows as 1000+ N/s; a soft step is < 100 N/s.
+    # Forces come from per-contact mj_contactForce (constraint solver result),
+    # NOT from data.cfrc_ext (which is for externally-applied forces only).
+    foot_body_ids = np.array([
+        mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name)
+        for name in ('ankle_pitch_l', 'ankle_pitch_r')
+    ], dtype=np.int32)
+    if (foot_body_ids < 0).any():
+        raise RuntimeError("ankle_pitch_l/_r body not found in MuJoCo model")
+    # Build geom→foot_idx mapping (0=L, 1=R, -1=other)
+    geom_to_foot = -np.ones(model.ngeom, dtype=np.int32)
+    for g in range(model.ngeom):
+        b = model.geom_bodyid[g]
+        if b == foot_body_ids[0]:
+            geom_to_foot[g] = 0
+        elif b == foot_body_ids[1]:
+            geom_to_foot[g] = 1
+    max_foot_frc = 0.0
+    max_foot_frc_rate = 0.0
+    prev_foot_frc = np.zeros(2, dtype=np.float32)
+    _contact_force_buf = np.zeros(6, dtype=np.float64)
 
     def _measure(idx):
         z_log[idx] = data.qpos[2]
@@ -165,6 +189,23 @@ def run_recovery_episode(model, data, session, input_name, cfg, init_state, seed
             peak_ratio = max(peak_ratio, float((abs_tau / effort_limits).max()))
             sum_abs_tau += float(abs_tau.sum())
             n_tau_samples += abs_tau.size
+            # Foot contact force: iterate active contacts, sum per foot.
+            foot_frc = np.zeros(2, dtype=np.float32)
+            for ci in range(data.ncon):
+                c = data.contact[ci]
+                f1, f2 = geom_to_foot[c.geom1], geom_to_foot[c.geom2]
+                target = f1 if f1 >= 0 else f2
+                if target < 0:
+                    continue  # neither geom is a foot
+                mujoco.mj_contactForce(model, data, ci, _contact_force_buf)
+                foot_frc[target] += float(np.linalg.norm(_contact_force_buf[:3]))
+            cur_max = float(foot_frc.max())
+            if cur_max > max_foot_frc:
+                max_foot_frc = cur_max
+            cur_rate = float(np.abs(foot_frc - prev_foot_frc).max() / sim_dt)
+            if cur_rate > max_foot_frc_rate:
+                max_foot_frc_rate = cur_rate
+            prev_foot_frc = foot_frc
 
         _measure(t + 1)
 
@@ -211,6 +252,8 @@ def run_recovery_episode(model, data, session, input_name, cfg, init_state, seed
         'mean_abs_tau_nm': mean_abs_tau,
         'action_jerk_rms': action_jerk_rms,
         'post_upright_jerk_rms': post_upright_jerk_rms,
+        'max_foot_frc_n': max_foot_frc,
+        'max_foot_frc_rate_n_s': max_foot_frc_rate,
         'pose_label': str(init_state.get('pose_label', '?')),
     }
 
@@ -298,6 +341,10 @@ def quick_eval_recovery(onnx_path, sim_cfg, manifest=None, runs=100, init_pool_p
     mean_jerk_rms   = float(np.mean([r['action_jerk_rms'] for r in results]))
     post_jerks      = [r['post_upright_jerk_rms'] for r in results if not np.isnan(r['post_upright_jerk_rms'])]
     mean_post_jerk  = float(np.mean(post_jerks)) if post_jerks else float('nan')
+    mean_max_foot_frc      = float(np.mean([r['max_foot_frc_n'] for r in results]))
+    max_max_foot_frc       = float(np.max ([r['max_foot_frc_n'] for r in results]))
+    mean_max_foot_frc_rate = float(np.mean([r['max_foot_frc_rate_n_s'] for r in results]))
+    max_max_foot_frc_rate  = float(np.max ([r['max_foot_frc_rate_n_s'] for r in results]))
 
     return {
         'sim2sim/recovery_success_rate': succ_rate,
@@ -312,6 +359,10 @@ def quick_eval_recovery(onnx_path, sim_cfg, manifest=None, runs=100, init_pool_p
         'sim2sim/recovery_max_peak_tau_ratio':  max_peak_ratio,
         'sim2sim/recovery_action_jerk_rms':       mean_jerk_rms,
         'sim2sim/recovery_post_upright_jerk_rms': mean_post_jerk,
+        'sim2sim/recovery_mean_max_foot_frc_n':   mean_max_foot_frc,
+        'sim2sim/recovery_max_foot_frc_n':        max_max_foot_frc,
+        'sim2sim/recovery_mean_max_foot_frc_rate_n_s': mean_max_foot_frc_rate,
+        'sim2sim/recovery_max_foot_frc_rate_n_s': max_max_foot_frc_rate,
     }
 
 
@@ -416,6 +467,9 @@ def main():
     mean_jerk_rms   = float(np.mean([r['action_jerk_rms'] for r in results]))
     post_jerks      = [r['post_upright_jerk_rms'] for r in results if not np.isnan(r['post_upright_jerk_rms'])]
     mean_post_jerk  = float(np.mean(post_jerks)) if post_jerks else float('nan')
+    mean_max_foot_frc      = float(np.mean([r['max_foot_frc_n'] for r in results]))
+    max_max_foot_frc       = float(np.max ([r['max_foot_frc_n'] for r in results]))
+    mean_max_foot_frc_rate = float(np.mean([r['max_foot_frc_rate_n_s'] for r in results]))
 
     print()
     print('=== Recovery sim2sim results ===')
@@ -433,6 +487,8 @@ def main():
     print(f'    >1.0 means policy is requesting more than the motor can deliver,')
     print(f'    sim is silently clipping for it, real robot will saturate.')
     print(f'  action_jerk_rms       : {mean_jerk_rms:.4f}   (post-upright: {mean_post_jerk:.4f})')
+    print(f'  max foot |F|          : {mean_max_foot_frc:.0f} N   (worst-run: {max_max_foot_frc:.0f} N)')
+    print(f'  max foot |dF/dt|      : {mean_max_foot_frc_rate:.0f} N/s  (>50k = slam; <5k = soft step; body weight ~50N)')
 
     if args.by_label:
         from collections import defaultdict

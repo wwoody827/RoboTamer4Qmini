@@ -243,6 +243,8 @@ def train():
                           f'(max {_metrics.get("sim2sim/recovery_max_peak_tau_ratio", float("nan")):.2f}×)  '
                           f'jerk={_metrics.get("sim2sim/recovery_action_jerk_rms", float("nan")):.4f}'
                           f'(post={_metrics.get("sim2sim/recovery_post_upright_jerk_rms", float("nan")):.4f})  '
+                          f'foot_F={_metrics.get("sim2sim/recovery_mean_max_foot_frc_n", float("nan")):.0f}N '
+                          f'(dF/dt={_metrics.get("sim2sim/recovery_mean_max_foot_frc_rate_n_s", float("nan")):.0f}N/s)  '
                           f'({_elapsed:.0f}s)')
                 else:
                     _surv_str = '  '.join(
