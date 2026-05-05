@@ -1,0 +1,64 @@
+# Recovery v10 — strip ALL smoothness/torque penalties, see if the policy
+# can learn to attempt fallen recovery at all.
+#
+# v9 video diagnosis: policy collapsed to near-deterministic non-attempt
+# behavior on supine/prone/side. Same final state across seeds → policy
+# is outputting a constant action for non-balance obs. Smoothness mask
+# alone (v9 iter 5500) didn't break the trap.
+#
+# Hypothesis: the policy needs FULL freedom to slam/jerk its way to
+# upright before any cleanliness expectation. Once it's solving the task,
+# we re-introduce smoothness/torque penalties via a v11 fine-tune to
+# polish the motion.
+#
+# Stage A (this config — recovery_v10): all penalty weights → 0
+#   action_rate:           0
+#   action_jerk:           0
+#   joint_vel_pen:         0
+#   torque_pen:            0
+#   torque_smooth_sat_pen: 0
+#   smoothness_upright_only: false (moot when weights are 0)
+# Keeps height (sat_linear), pose_match, orientation, terminal as the
+# "what to do" signal. Sim torque clip stays at URDF default (preserves
+# sim2real fidelity — the policy can command up to peak rated torque).
+#
+# Stage B (future v11): re-anneal smoothness/torque penalties at gentle
+# weights to clean up the motion without losing recovery capability.
+#
+# Resume: experiments/20260504_1714_recovery_v9/model/policy.pt (=v9 iter
+# ~5879). Full resume — kept optimizer state since we're only zeroing
+# weights, not changing reward shape direction.
+_base: recovery/recovery_v9.yaml
+
+algorithm:
+  # 7× higher than balance_v1's 0.003. v9 video diagnosis showed σ collapsed
+  # to ~0.075 with deterministic-attractor failure (4/4 supine identical).
+  # 0.02 keeps σ substantially wider through training so policy explores
+  # action space and can stumble onto successful get-up trajectories.
+  # Comparable to BD_X (0.01) and DeepMimic (~0.01) but pushed higher because
+  # the failure here is specifically exploration collapse on hard subsets.
+  entropy_coef: 0.02
+
+reward:
+  action_rate:           0.0
+  action_jerk:           0.0
+  joint_vel_pen:         0.0
+  torque_pen:            0.0
+  torque_smooth_sat_pen: 0.0
+  smoothness_upright_only: false
+
+task:
+  # Faster fallen ramp. Balance learns fast under sat_linear height (v9 hit
+  # 96% balance @ iter 1500 from random); no need to hold 100% balance for
+  # 1500 iters. Compress balance phase, push fallen heavier earlier.
+  pool_curriculum:
+    enabled: true
+    schedule:
+      - iter: 0
+        weights: {balance: 1.0, tilted: 0.0, fallen: 0.0}
+      - iter: 500
+        weights: {balance: 1.0, tilted: 0.0, fallen: 0.0}    # short balance hold
+      - iter: 1500
+        weights: {balance: 0.4, tilted: 0.3, fallen: 0.3}    # heavy fallen by here
+      - iter: 3000
+        weights: {balance: 0.2, tilted: 0.3, fallen: 0.5}    # 50% fallen for solid signal

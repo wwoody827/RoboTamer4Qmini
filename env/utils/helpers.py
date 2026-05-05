@@ -60,6 +60,8 @@ def get_args():
          "help": "Path to YAML config file."},
         {"name": "--resume", "type": str, "action": "store_true", "default": None,
          "help": "Resume training from a checkpoint"},
+        {"name": "--init_only", "action": "store_true", "default": False,
+         "help": "When --resume is set, load only actor weights (no critic, no optimizer, no LR, iter=1). For transfer learning where reward changes."},
         {"name": "--render", "action": "store_true", "default": False, "help": "Force display off at all times"},
         {"name": "--fix_cam", "action": "store_true", "default": False, "help": "Force display off at all times"},
         {"name": "--cmp_real", "action": "store_true", "default": False,

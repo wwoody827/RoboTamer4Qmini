@@ -131,10 +131,21 @@ def train():
         saved_model_state_dict = torch.load(join(resume_model_dir, 'policy.pt'))
         alg.actor.load_state_dict(saved_model_state_dict['actor'])
         alg.critic.load_state_dict(saved_model_state_dict['critic'])
-        alg.optimizer.load_state_dict(saved_model_state_dict['optimizer'])
-        if 'learning_rate' in saved_model_state_dict:
-            alg.learning_rate = saved_model_state_dict['learning_rate']
-        current_learning_iteration = saved_model_state_dict['iteration']
+        if args.init_only:
+            # Transfer-learning mode: load actor + critic weights but reset
+            # optimizer (Adam moments are stale under the new reward), LR
+            # (typically annealed below initial), and iteration counter.
+            # NOTE: we *must* load the critic too — fresh critic outputs near-zero
+            # → enormous advantages → KL explosion (~100+) on iter 1 → adaptive
+            # schedule throttles LR to its 2e-5 floor for hundreds of iters.
+            print(f'[resume] init_only=True — loaded actor+critic from {resume_model_dir}; '
+                  f'optimizer/LR/iter reset')
+            current_learning_iteration = 1
+        else:
+            alg.optimizer.load_state_dict(saved_model_state_dict['optimizer'])
+            if 'learning_rate' in saved_model_state_dict:
+                alg.learning_rate = saved_model_state_dict['learning_rate']
+            current_learning_iteration = saved_model_state_dict['iteration']
     else:
         current_learning_iteration = 1
 
@@ -149,6 +160,10 @@ def train():
     rew_component_acc = None
     rew_component_steps = 0
     for it in range(current_learning_iteration, total_iteration):
+
+        # Iteration-driven pool curriculum (recovery only).
+        if hasattr(gym_env.task, '_pool_curriculum') and gym_env.task._pool_curriculum is not None:
+            gym_env.task._pool_curriculum.update_iter(it)
 
         start = time.time()
         rew_component_acc = None
@@ -300,7 +315,8 @@ def train():
         # Recovery / curriculum scalars from task.info() (last-step snapshot).
         if isinstance(info, dict):
             for k, v in info.items():
-                if not (k.startswith('curriculum/') or k.startswith('recovery')):
+                if not (k.startswith('curriculum/') or k.startswith('recovery')
+                        or k.startswith('pool/')):
                     continue
                 if torch.is_tensor(v):
                     if v.numel() != 1:

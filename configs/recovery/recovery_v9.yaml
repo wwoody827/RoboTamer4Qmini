@@ -1,0 +1,79 @@
+# Recovery v9 — fresh start from balance_v2 (history=3 skip=4 + mirror)
+# with v7/v8's reward shape.
+#
+# Why v9 ≠ v8: v8 seeded from balance_v3 (history=1, no mirror). v8 hyper-
+# specialized into supine and abandoned prone (n=200 by_label: 0% prone, 0%
+# side, 100% supine, overall 82% — surface τ/jerk numbers improved only
+# because the policy stopped attempting hard cases). Hypothesis: with
+# mirror enforcing L↔R symmetry and history=3 giving 120ms momentum
+# context, the policy can't trade off prone for supine (mirror ties the
+# two together) and has more information to plan get-up trajectories.
+#
+# Reward shape: identical to v8.
+#   torque_smooth_sat_pen = -0.005   (same as v8)
+#   action_jerk           = -0.02
+#   height/pose/orientation kept (v6 unlock).
+#
+# Obs / action stack:
+#   - history=3, skip=4 (120ms span at 67Hz; matches balance_v2)
+#   - mirror enabled (Phase-4 generic slot-driven Mirror)
+#
+# Baselines (n=200 mixed pool, recovery_init_states_mixed.npz):
+#   v6 @10000 (history=1, no mirror):  91% / prone 56% / jerk 5.69 / τpeak 2.74×
+#   v8 @12000 (history=1, no mirror):  82% / prone  0% / jerk 3.64 / τpeak 1.82×
+#                                       ↑ specialized into supine, lost prone
+#   v9 target:  ≥90% with prone ≥50%, jerk ≤3.0, τpeak ≤2.0×
+#
+# Resume: experiments/recovery_v9/model/policy.pt (= balance_v2 iter ≥1500
+#         with 91% balance success).
+_base: balance_v2.yaml
+
+runner:
+  episode_length_s: 8                 # match v6/v7/v8 (recovery.yaml has 5s; balance was OK with 5s but fallen recovery wants 8s budget)
+
+task:
+  init_states_path: data/recovery_init_states_mixed.npz
+  init_pd_target: ref
+  # Iteration-driven init-pool curriculum to avoid the KL explosion that
+  # happens when the reward-distribution suddenly shifts from balance to
+  # 40%-fallen at the stage transition. Starts at 100% balance (matches
+  # balance_v2 seed exactly → critic stays valid, optimizer re-equilibrates),
+  # ramps to v8's 30/30/40 by iter 3000.
+  pool_curriculum:
+    enabled: true
+    # From-scratch schedule. balance_v2 hit 91% balance success at iter 1500;
+    # we hold 100% balance until iter 1500 so the policy has the same balance
+    # foundation, then progressively introduce tilted/fallen.
+    schedule:
+      - iter: 0
+        weights: {balance: 1.0, tilted: 0.0, fallen: 0.0}
+      - iter: 1500
+        weights: {balance: 1.0, tilted: 0.0, fallen: 0.0}
+      - iter: 3000
+        weights: {balance: 0.6, tilted: 0.3, fallen: 0.1}
+      - iter: 5000
+        weights: {balance: 0.3, tilted: 0.3, fallen: 0.4}
+
+reward:
+  pose_match:    2.0
+  pose_match_k:  4.0
+  orientation:   1.0
+  orientation_k: 0.5
+  # Saturated-linear height: zero below height_floor (lying still at fallen
+  # gets ~0), linear ramp to weight at target. Provides constant strong
+  # gradient toward standing. Mid-training switch from Gaussian (k=2) at
+  # iter ~3500 because policy was abandoning fallen attempts: lying still at
+  # z=0.17 gave 1.7 height reward vs 2.0 at upright = only +0.3 to gain by
+  # rising. With sat_linear: lying gives ~0, upright gives 4 → +4 to gain.
+  height:        4.0       # was 2.0
+  height_shape:  sat_linear
+  height_floor:  0.15
+  torque_smooth_sat_pen: -0.005
+  action_rate:           -0.02
+  action_jerk:           -0.02
+  joint_vel_pen:         -0.001
+  torque_pen:            -0.0001
+  # Mask all smoothness penalties when policy is not upright. Frees the
+  # get-up phase from the smoothness tax that v9 EV analysis showed was
+  # making "lie still" locally optimal. Once upright, smoothness re-engages.
+  smoothness_upright_only: true

@@ -58,6 +58,102 @@ def _joint_pos_abs(task):
     return task.joint_pos
 
 
+# ─── PoolCurriculum: iteration-driven init-pool blending ────────────────────
+
+_FALLEN_LABELS = {'prone', 'supine', 'side_left', 'side_right'}
+_GROUP_OF_LABEL = lambda lbl: (
+    'balance' if lbl == 'balance' else
+    'tilted'  if lbl == 'tilted'  else
+    'fallen'  if lbl in _FALLEN_LABELS else
+    None
+)
+
+
+class PoolCurriculum:
+    """Sample init-pool indices from a 3-way (balance / tilted / fallen) blend
+    that linearly interpolates between user-specified iteration milestones.
+
+    cfg.task.pool_curriculum:
+      enabled: true
+      schedule:
+        - iter: 0      weights: {balance: 1.0, tilted: 0.0, fallen: 0.0}
+        - iter: 2000   weights: {balance: 0.5, tilted: 0.3, fallen: 0.2}
+        - iter: 4000   weights: {balance: 0.3, tilted: 0.3, fallen: 0.4}
+    """
+
+    def __init__(self, pool_pose_label, schedule, device='cpu'):
+        if pool_pose_label is None:
+            raise ValueError("PoolCurriculum needs pool_pose_label (init pool must have labels)")
+        # Group → torch tensor of indices into the pool
+        self.indices = {}
+        for group_name in ('balance', 'tilted', 'fallen'):
+            mask = np.array([_GROUP_OF_LABEL(str(l)) == group_name
+                             for l in pool_pose_label])
+            self.indices[group_name] = torch.as_tensor(np.where(mask)[0],
+                                                      dtype=torch.long,
+                                                      device=device)
+        # Sort schedule by iter
+        self.schedule = sorted(
+            ((int(p['iter']), {k: float(v) for k, v in p['weights'].items()})
+             for p in schedule),
+            key=lambda x: x[0],
+        )
+        self.cur_iter = 0
+        self.device = device
+        # Sanity: each group with nonzero weight at any milestone must have ≥1 sample
+        nonzero_groups = set()
+        for _, w in self.schedule:
+            for g, v in w.items():
+                if v > 0: nonzero_groups.add(g)
+        for g in nonzero_groups:
+            if len(self.indices[g]) == 0:
+                raise ValueError(f"PoolCurriculum: group '{g}' is referenced "
+                                 f"in schedule but pool has 0 samples with that label group")
+
+    def update_iter(self, it):
+        self.cur_iter = int(it)
+
+    def current_weights(self):
+        s = self.schedule
+        if self.cur_iter <= s[0][0]:
+            return s[0][1]
+        if self.cur_iter >= s[-1][0]:
+            return s[-1][1]
+        for i in range(len(s) - 1):
+            it_a, w_a = s[i]
+            it_b, w_b = s[i + 1]
+            if it_a <= self.cur_iter <= it_b:
+                t = (self.cur_iter - it_a) / max(it_b - it_a, 1)
+                return {k: w_a.get(k, 0.0) * (1 - t) + w_b.get(k, 0.0) * t
+                        for k in set(w_a) | set(w_b)}
+        return s[-1][1]
+
+    GROUPS = ('balance', 'tilted', 'fallen')
+
+    def sample_indices(self, n):
+        w = self.current_weights()
+        probs = torch.tensor([max(w.get(g, 0.0), 0.0) for g in self.GROUPS],
+                             dtype=torch.float, device=self.device)
+        # Drop groups with zero pool samples (defensive)
+        for i, g in enumerate(self.GROUPS):
+            if len(self.indices[g]) == 0:
+                probs[i] = 0.0
+        probs = probs / probs.sum().clamp_min(1e-8)
+        # Sample which group per env, then index within group
+        chosen_g = torch.multinomial(probs, n, replacement=True)
+        out = torch.zeros(n, dtype=torch.long, device=self.device)
+        for i, g in enumerate(self.GROUPS):
+            mask = (chosen_g == i)
+            if mask.any() and len(self.indices[g]) > 0:
+                # Uniform pick within group
+                k = int(mask.sum().item())
+                pick = torch.randint(0, len(self.indices[g]), (k,), device=self.device)
+                out[mask] = self.indices[g][pick]
+        # Stash for downstream use (per-group success / count metrics in info())
+        self._last_chosen_g = chosen_g
+        return out
+
+
 # ─── RecoveryTask ───────────────────────────────────────────────────────────
 
 # Reward group keys (for cfg.reward.groups_enabled):
@@ -179,6 +275,24 @@ class RecoveryTask(NullTask):
             )
         else:
             self._curriculum = None
+
+        # ─── Pool curriculum (iteration-driven balance/tilted/fallen blend) ─
+        # Independent of and supersedes the legacy tilt-binning curriculum.
+        # Used when cfg.task.pool_curriculum.enabled is true.
+        pcur_cfg = getattr(self.cfg.task, 'pool_curriculum', None)
+        if pcur_cfg is not None and bool(getattr(pcur_cfg, 'enabled', False)):
+            schedule = list(getattr(pcur_cfg, 'schedule', []) or [])
+            if not schedule:
+                raise ValueError("task.pool_curriculum.enabled but no schedule provided")
+            self._pool_curriculum = PoolCurriculum(
+                pool_pose_label=self._pool_pose_label,
+                schedule=schedule,
+                device=self.device,
+            )
+            print(f"[RecoveryTask] pool_curriculum enabled with "
+                  f"{len(schedule)} milestones; first weights: {self._pool_curriculum.current_weights()}")
+        else:
+            self._pool_curriculum = None
         # Tracks which envs were sampled this episode, to record outcomes on done.
         self._episode_active = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
@@ -265,6 +379,14 @@ class RecoveryTask(NullTask):
 
     def _sample_indices(self, env_ids):
         n = len(env_ids)
+        if self._pool_curriculum is not None:
+            idx = self._pool_curriculum.sample_indices(n)
+            # Persist group membership per-env for TB metrics in info().
+            if not hasattr(self, '_env_group') or self._env_group is None:
+                self._env_group = -torch.ones(self.num_envs,
+                                              dtype=torch.long, device=self.device)
+            self._env_group[env_ids] = self._pool_curriculum._last_chosen_g
+            return idx
         if self._curriculum is not None:
             return self._curriculum.sample_indices(n)
         return torch.randint(0, self._pool_size, (n,), device=self.device)
@@ -491,17 +613,26 @@ class RecoveryTask(NullTask):
             components += [w_p * pose_rew, w_o * orient_rew]
             names += ['pose_match', 'orientation']
 
-            # Height tracking: exp(-k * (z - target)^2). Re-added for v6 — v5
-            # by_label eval showed pose_match is satisfied by lying flat with
-            # legs straight (joints match ref at z≈0.17m), so without a height
-            # signal nothing rewards the *act of getting up*. Same shape as
-            # the pre-pose_match version. Default w=0 keeps it off for older
-            # configs; v6 turns it on.
+            # Height tracking. Two shapes:
+            #   'gaussian' (default): exp(-k * (z - target)^2). Original v6 form.
+            #     Rewards proximity to target_height. Tail decay means low z
+            #     still gets non-trivial reward, which can make passive lying
+            #     attractive — see EV analysis in exp_log "v9: option B".
+            #   'sat_linear': clip((z - floor) / (target - floor), 0, 1).
+            #     Zero reward below height_floor (passive fallen pose gets
+            #     ~0). Linear up to target. Strong constant gradient toward
+            #     standing, no incentive to lie still.
             w_h = float(self.rew_weights.get('height', 0.0))
             if w_h != 0.0:
                 z = self.env.base_pos[:, [2]]
-                k_h = float(self.rew_weights.get('height_k', 2.0))
-                height_rew = torch.exp(-k_h * (z - self._target_height) ** 2)
+                shape = str(self.rew_weights.get('height_shape', 'gaussian'))
+                if shape == 'sat_linear':
+                    floor = float(self.rew_weights.get('height_floor', 0.15))
+                    height_rew = ((z - floor) /
+                                  max(self._target_height - floor, 1e-3)).clip(0., 1.)
+                else:
+                    k_h = float(self.rew_weights.get('height_k', 2.0))
+                    height_rew = torch.exp(-k_h * (z - self._target_height) ** 2)
                 components.append(w_h * height_rew)
                 names.append('height')
 
@@ -610,15 +741,24 @@ class RecoveryTask(NullTask):
             w_normsq  = float(self.rew_weights.get('torque_norm_sq_pen', 0.0))
             w_excess  = float(self.rew_weights.get('torque_excess_pen', 0.0))
             w_smooth  = float(self.rew_weights.get('torque_smooth_sat_pen', 0.0))
+            # Optional: mask smoothness penalties when not upright. Lets the
+            # policy use sharp/jerky/high-torque motion to GET upright without
+            # paying the smoothness tax — once upright, smoothness kicks in to
+            # keep stable behavior clean. Addresses the "lying still beats
+            # trying" Nash trap from EV analysis (recovery_v9 iter ~3500).
+            if bool(self.rew_weights.get('smoothness_upright_only', False)):
+                _smooth_mask = self._is_upright()      # [num_envs, 1] in {0., 1.}
+            else:
+                _smooth_mask = 1.0
             components += [
-                w_rate    * act_rate,
-                w_jerk    * act_jerk,
-                w_jvel    * joint_v,
-                w_torque  * torque_pen,
-                w_sat     * torque_sat,
-                w_normsq  * torque_norm_sq,
-                w_excess  * torque_excess,
-                w_smooth  * torque_smooth_sat,
+                w_rate    * act_rate         * _smooth_mask,
+                w_jerk    * act_jerk         * _smooth_mask,
+                w_jvel    * joint_v          * _smooth_mask,
+                w_torque  * torque_pen       * _smooth_mask,
+                w_sat     * torque_sat       * _smooth_mask,
+                w_normsq  * torque_norm_sq   * _smooth_mask,
+                w_excess  * torque_excess    * _smooth_mask,
+                w_smooth  * torque_smooth_sat * _smooth_mask,
             ]
             names += ['action_rate', 'action_jerk', 'joint_vel_pen',
                       'torque_pen', 'torque_sat', 'torque_norm_sq',
@@ -693,4 +833,20 @@ class RecoveryTask(NullTask):
             out['curriculum/stage'] = float(cinfo['curriculum/stage'])
             out['curriculum/rolling_success'] = float(cinfo['curriculum/rolling_success'])
             out['curriculum/episodes_in_stage'] = float(cinfo['curriculum/episodes_in_stage'])
+        # Pool curriculum: schedule weights + per-group env count + per-group
+        # upright fraction. Useful to see if the policy is succeeding on
+        # balance subset while failing on fallen, etc.
+        if self._pool_curriculum is not None and hasattr(self, '_env_group'):
+            w = self._pool_curriculum.current_weights()
+            for i, g in enumerate(self._pool_curriculum.GROUPS):
+                out[f'pool/weight_{g}'] = float(w.get(g, 0.0))
+                mask = (self._env_group == i)
+                n_g = int(mask.sum().item())
+                out[f'pool/n_{g}'] = float(n_g)
+                if n_g > 0 and hasattr(self, '_last_is_upright') \
+                        and self._last_is_upright is not None:
+                    upright_in_group = self._last_is_upright[mask].float().mean()
+                    out[f'pool/upright_{g}'] = float(upright_in_group.item())
+                else:
+                    out[f'pool/upright_{g}'] = float('nan')
         return out
