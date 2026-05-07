@@ -19,8 +19,8 @@ from isaacgym.torch_utils import *
 from torch.utils.tensorboard import SummaryWriter
 import torch
 
-# os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
-os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+# Async kernel launches (default). Set CUDA_LAUNCH_BLOCKING=1 only when
+# debugging — synchronous mode loses CPU/GPU pipelining.
 
 
 def _cfg_section_to_dict(section):
@@ -131,6 +131,9 @@ def train():
         saved_model_state_dict = torch.load(join(resume_model_dir, 'policy.pt'))
         alg.actor.load_state_dict(saved_model_state_dict['actor'])
         alg.critic.load_state_dict(saved_model_state_dict['critic'])
+        # Restore return-normalization stats if both saved and active.
+        if alg.return_rms is not None and 'return_rms' in saved_model_state_dict:
+            alg.return_rms.load_state_dict(saved_model_state_dict['return_rms'])
         if args.init_only:
             # Transfer-learning mode: load actor + critic weights but reset
             # optimizer (Adam moments are stale under the new reward), LR
@@ -211,6 +214,8 @@ def train():
             'learning_rate': alg.learning_rate,
             'iteration': it,
         }
+        if alg.return_rms is not None:
+            saved_model_state_dict['return_rms'] = alg.return_rms.state_dict()
         try:
             torch.save(saved_model_state_dict, join(model_dir, 'policy.pt'))
         except OSError as e:

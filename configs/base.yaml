@@ -73,6 +73,10 @@ algorithm:
   gae_lambda: 0.95
   desired_kl: 0.01
   max_grad_norm: 1.
+  # PopArt-lite return normalization. When true, critic predicts in
+  # normalized space (R-μ)/σ; PPO denormalizes for GAE. Stabilizes
+  # value loss when reward scales differ across runs / curricula.
+  normalize_value: false
 
 action:
   action_mode: increment      # 'increment' (legacy) | 'absolute' (BD_X style)

@@ -1,4 +1,5 @@
 from rl.storage import Transition, RolloutStorage
+from rl.utils.running_mean_std import RunningMeanStd
 import torch
 import torch.nn as nn
 
@@ -20,6 +21,7 @@ class PPO:
             eps_clip=0.2,
             use_clipped_value_loss=True,
             schedule="fixed",
+            normalize_value=False,
             device='cpu',
     ):
         self.actor = actor.to(device)
@@ -47,6 +49,17 @@ class PPO:
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
 
+        # Value/return normalization (PopArt-lite). When enabled the critic
+        # predicts in normalized space (R-μ)/σ; we denormalize for GAE/storage
+        # so reward semantics stay raw.
+        self.normalize_value = normalize_value
+        self.return_rms = RunningMeanStd((1,), device=device) if normalize_value else None
+
+    def _denorm_value(self, v_norm):
+        if not self.normalize_value:
+            return v_norm
+        return v_norm * self.return_rms.std() + self.return_rms.mean
+
     def init_storage(self, num_envs, num_transitions_per_env, critic_obs_shape, actor_obs_shape, action_shape):
         self.storage = RolloutStorage(num_envs, num_transitions_per_env, critic_obs_shape, actor_obs_shape,
                                       action_shape, self.device)
@@ -63,7 +76,7 @@ class PPO:
             dim=-1).detach()  # 计算action在定义的正态分布（mean,1）中对应的概率的对数
         self.transition.action_mean = dist.mean.detach()
         self.transition.action_sigma = dist.stddev.detach()
-        self.transition.values = self.critic(cri_obs).detach()
+        self.transition.values = self._denorm_value(self.critic(cri_obs).detach())
         return actions
 
     def process_env_step(self, rewards, dones, infos):
@@ -80,8 +93,13 @@ class PPO:
 
     def compute_returns(self, cri_obs):
         cri_obs = cri_obs.to(torch.float32)
-        last_values = self.critic(cri_obs).detach()
+        last_values = self._denorm_value(self.critic(cri_obs).detach())
         self.storage.compute_returns(last_values, self.gamma, self.gae_lambda)
+        # Update running stats with the just-computed returns. Done before
+        # update() so the loss uses post-update normalization (consistent with
+        # what the critic will be regressing toward).
+        if self.normalize_value:
+            self.return_rms.update(self.storage.returns.flatten(0, 1))
 
     def update(self, mirror=None, mirror_weight=0.5):
         """
@@ -102,7 +120,17 @@ class PPO:
             mu_batch = dist.mean
             sigma_batch = dist.stddev
             entropy_batch = dist.entropy().sum(dim=-1)
+            # Critic outputs in normalized space when normalize_value=True.
+            # Targets/old-values get normalized to match before MSE.
             value_batch = self.critic(cri_obs_batch)
+            if self.normalize_value:
+                rms_mean = self.return_rms.mean
+                rms_std  = self.return_rms.std()
+                returns_norm = (returns_batch - rms_mean) / rms_std
+                target_values_norm = (target_values_batch - rms_mean) / rms_std
+            else:
+                returns_norm = returns_batch
+                target_values_norm = target_values_batch
 
             # KL
             if self.desired_kl != None and self.schedule == 'adaptive':
@@ -127,15 +155,15 @@ class PPO:
             surr2 = torch.clamp(ratio, 1.0 - self.eps_clip, 1.0 + self.eps_clip) * advantages_batch.squeeze()
             surrogate_loss = -torch.min(surr1, surr2).mean()
 
-            # Value function loss
+            # Value function loss (in normalized space when normalize_value=True)
             if self.use_clipped_value_loss:
-                value_clipped = target_values_batch + (value_batch - target_values_batch).clamp(-self.eps_clip,
-                                                                                                self.eps_clip)
-                value_losses = (value_batch - returns_batch).pow(2)
-                value_losses_clipped = (value_clipped - returns_batch).pow(2)
+                value_clipped = target_values_norm + (value_batch - target_values_norm).clamp(-self.eps_clip,
+                                                                                              self.eps_clip)
+                value_losses = (value_batch - returns_norm).pow(2)
+                value_losses_clipped = (value_clipped - returns_norm).pow(2)
                 value_loss = torch.max(value_losses, value_losses_clipped).mean()
             else:
-                value_loss = (returns_batch - value_batch).pow(2).mean()
+                value_loss = (returns_norm - value_batch).pow(2).mean()
 
             # Mirror augmentation: surrogate loss on L↔R mirrored data
             mirror_loss = torch.tensor(0.0, device=self.device)
