@@ -126,17 +126,35 @@ def run_recovery_episode(model, data, session, input_name, cfg, init_state, seed
     ], dtype=np.int32)
     if (foot_body_ids < 0).any():
         raise RuntimeError("ankle_pitch_l/_r body not found in MuJoCo model")
-    # Build geom→foot_idx mapping (0=L, 1=R, -1=other)
+    # Body bodies for "non-foot impact" metric (matches termination_contact_indices
+    # in env: knee, base, hip — checks if policy is exploiting body-ground forces).
+    body_names = ('base_link',
+                  'hip_yaw_l', 'hip_roll_l', 'hip_pitch_l',
+                  'hip_yaw_r', 'hip_roll_r', 'hip_pitch_r',
+                  'knee_pitch_l', 'knee_pitch_r')
+    body_body_ids = np.array([
+        mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name)
+        for name in body_names
+    ], dtype=np.int32)
+    # Build geom→foot_idx and geom→body_idx maps
     geom_to_foot = -np.ones(model.ngeom, dtype=np.int32)
+    geom_to_body = -np.ones(model.ngeom, dtype=np.int32)
     for g in range(model.ngeom):
         b = model.geom_bodyid[g]
         if b == foot_body_ids[0]:
             geom_to_foot[g] = 0
         elif b == foot_body_ids[1]:
             geom_to_foot[g] = 1
+        for i, bid in enumerate(body_body_ids):
+            if b == bid:
+                geom_to_body[g] = i
+                break
     max_foot_frc = 0.0
     max_foot_frc_rate = 0.0
     prev_foot_frc = np.zeros(2, dtype=np.float32)
+    max_body_frc = 0.0                                     # NEW
+    max_body_frc_rate = 0.0                                # NEW
+    prev_body_frc = np.zeros(len(body_names), dtype=np.float32)  # NEW
     _contact_force_buf = np.zeros(6, dtype=np.float64)
 
     def _measure(idx):
@@ -189,16 +207,26 @@ def run_recovery_episode(model, data, session, input_name, cfg, init_state, seed
             peak_ratio = max(peak_ratio, float((abs_tau / effort_limits).max()))
             sum_abs_tau += float(abs_tau.sum())
             n_tau_samples += abs_tau.size
-            # Foot contact force: iterate active contacts, sum per foot.
+            # Per-step contact forces — both feet (good contacts) AND
+            # body bodies (bad contacts: knee/base/hip). Tracking body
+            # impacts separately to detect "exploit body-ground forces"
+            # strategy.
             foot_frc = np.zeros(2, dtype=np.float32)
+            body_frc = np.zeros(len(body_names), dtype=np.float32)
             for ci in range(data.ncon):
                 c = data.contact[ci]
-                f1, f2 = geom_to_foot[c.geom1], geom_to_foot[c.geom2]
-                target = f1 if f1 >= 0 else f2
-                if target < 0:
-                    continue  # neither geom is a foot
                 mujoco.mj_contactForce(model, data, ci, _contact_force_buf)
-                foot_frc[target] += float(np.linalg.norm(_contact_force_buf[:3]))
+                fmag = float(np.linalg.norm(_contact_force_buf[:3]))
+                # Foot
+                f1, f2 = geom_to_foot[c.geom1], geom_to_foot[c.geom2]
+                ft = f1 if f1 >= 0 else f2
+                if ft >= 0:
+                    foot_frc[ft] += fmag
+                # Body (knee/base/hip)
+                b1, b2 = geom_to_body[c.geom1], geom_to_body[c.geom2]
+                bt = b1 if b1 >= 0 else b2
+                if bt >= 0:
+                    body_frc[bt] += fmag
             cur_max = float(foot_frc.max())
             if cur_max > max_foot_frc:
                 max_foot_frc = cur_max
@@ -206,6 +234,14 @@ def run_recovery_episode(model, data, session, input_name, cfg, init_state, seed
             if cur_rate > max_foot_frc_rate:
                 max_foot_frc_rate = cur_rate
             prev_foot_frc = foot_frc
+            # Body impact tracking (max across knee/base/hip bodies, max over episode)
+            cur_body_max = float(body_frc.max())
+            if cur_body_max > max_body_frc:
+                max_body_frc = cur_body_max
+            cur_body_rate = float(np.abs(body_frc - prev_body_frc).max() / sim_dt)
+            if cur_body_rate > max_body_frc_rate:
+                max_body_frc_rate = cur_body_rate
+            prev_body_frc = body_frc
 
         _measure(t + 1)
 
@@ -254,6 +290,8 @@ def run_recovery_episode(model, data, session, input_name, cfg, init_state, seed
         'post_upright_jerk_rms': post_upright_jerk_rms,
         'max_foot_frc_n': max_foot_frc,
         'max_foot_frc_rate_n_s': max_foot_frc_rate,
+        'max_body_frc_n': max_body_frc,
+        'max_body_frc_rate_n_s': max_body_frc_rate,
         'pose_label': str(init_state.get('pose_label', '?')),
     }
 
@@ -345,6 +383,10 @@ def quick_eval_recovery(onnx_path, sim_cfg, manifest=None, runs=100, init_pool_p
     max_max_foot_frc       = float(np.max ([r['max_foot_frc_n'] for r in results]))
     mean_max_foot_frc_rate = float(np.mean([r['max_foot_frc_rate_n_s'] for r in results]))
     max_max_foot_frc_rate  = float(np.max ([r['max_foot_frc_rate_n_s'] for r in results]))
+    mean_max_body_frc      = float(np.mean([r['max_body_frc_n'] for r in results]))
+    max_max_body_frc       = float(np.max ([r['max_body_frc_n'] for r in results]))
+    mean_max_body_frc_rate = float(np.mean([r['max_body_frc_rate_n_s'] for r in results]))
+    max_max_body_frc_rate  = float(np.max ([r['max_body_frc_rate_n_s'] for r in results]))
 
     return {
         'sim2sim/recovery_success_rate': succ_rate,
@@ -363,6 +405,10 @@ def quick_eval_recovery(onnx_path, sim_cfg, manifest=None, runs=100, init_pool_p
         'sim2sim/recovery_max_foot_frc_n':        max_max_foot_frc,
         'sim2sim/recovery_mean_max_foot_frc_rate_n_s': mean_max_foot_frc_rate,
         'sim2sim/recovery_max_foot_frc_rate_n_s': max_max_foot_frc_rate,
+        'sim2sim/recovery_mean_max_body_frc_n':   mean_max_body_frc,
+        'sim2sim/recovery_max_body_frc_n':        max_max_body_frc,
+        'sim2sim/recovery_mean_max_body_frc_rate_n_s': mean_max_body_frc_rate,
+        'sim2sim/recovery_max_body_frc_rate_n_s': max_max_body_frc_rate,
     }
 
 
@@ -470,6 +516,9 @@ def main():
     mean_max_foot_frc      = float(np.mean([r['max_foot_frc_n'] for r in results]))
     max_max_foot_frc       = float(np.max ([r['max_foot_frc_n'] for r in results]))
     mean_max_foot_frc_rate = float(np.mean([r['max_foot_frc_rate_n_s'] for r in results]))
+    mean_max_body_frc      = float(np.mean([r['max_body_frc_n'] for r in results]))
+    max_max_body_frc       = float(np.max ([r['max_body_frc_n'] for r in results]))
+    mean_max_body_frc_rate = float(np.mean([r['max_body_frc_rate_n_s'] for r in results]))
 
     print()
     print('=== Recovery sim2sim results ===')
@@ -489,6 +538,8 @@ def main():
     print(f'  action_jerk_rms       : {mean_jerk_rms:.4f}   (post-upright: {mean_post_jerk:.4f})')
     print(f'  max foot |F|          : {mean_max_foot_frc:.0f} N   (worst-run: {max_max_foot_frc:.0f} N)')
     print(f'  max foot |dF/dt|      : {mean_max_foot_frc_rate:.0f} N/s  (>50k = slam; <5k = soft step; body weight ~50N)')
+    print(f'  max BODY |F|          : {mean_max_body_frc:.0f} N   (worst-run: {max_max_body_frc:.0f} N)  ← knee/base/hip — should be 0 if no exploit')
+    print(f'  max BODY |dF/dt|      : {mean_max_body_frc_rate:.0f} N/s')
 
     if args.by_label:
         from collections import defaultdict

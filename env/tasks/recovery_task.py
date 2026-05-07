@@ -244,6 +244,11 @@ class RecoveryTask(NullTask):
         self.foot_height = torch.zeros(self.num_envs, self.num_legs, dtype=torch.float, device=self.device)
         self.foot_pos_hd = self.env.foot_pos_hd.clone()
         self.foot_vel = self.env.foot_vel.clone()
+        # Per-env running max body / foot force during the current episode (for TB).
+        # Resets when env resets; tracks the worst body-ground impact within
+        # an episode to detect "policy uses body slam to launch" exploit.
+        self._episode_max_body_frc = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self._episode_max_foot_frc = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
 
         # ─── Init-state pool (settled fallen poses) ────────────────────────
         init_path = getattr(self.cfg.task, 'init_states_path', None)
@@ -467,6 +472,11 @@ class RecoveryTask(NullTask):
         self.base_euler = self.env.base_euler
         self.base_lin_vel = self.env.base_lin_vel
         self.foot_frc = self.env.foot_frc
+        # Reset per-episode body/foot impact trackers for these envs.
+        if hasattr(self, '_episode_max_body_frc'):
+            self._episode_max_body_frc[env_ids] = 0.0
+        if hasattr(self, '_episode_max_foot_frc'):
+            self._episode_max_foot_frc[env_ids] = 0.0
 
     def step(self):
         self.joint_pos = self.env.joint_pos
@@ -477,6 +487,16 @@ class RecoveryTask(NullTask):
         self.base_ang_vel = self.env.base_ang_vel
         self.base_lin_vel = self.env.base_lin_vel
         self.foot_frc = self.env.foot_frc
+        # Track per-episode max body and foot contact force (for TB visibility into
+        # impact peaks — body for exploit detection, foot for slam diagnosis).
+        body_cf = torch.norm(
+            self.env.contact_forces[:, self.env.termination_contact_indices, :],
+            dim=-1)
+        if body_cf.numel():
+            cur_body_max = body_cf.max(dim=1).values
+            self._episode_max_body_frc = torch.maximum(self._episode_max_body_frc, cur_body_max)
+        cur_foot_max = self.env.foot_frc.max(dim=1).values
+        self._episode_max_foot_frc = torch.maximum(self._episode_max_foot_frc, cur_foot_max)
         if self.cfg.terrain.mesh_type in ['trimesh', 'heightfield']:
             self.foot_height = self.env.get_foot_height_to_ground()
         else:
@@ -558,16 +578,26 @@ class RecoveryTask(NullTask):
     def terminate(self):
         # Termination conditions for recovery:
         #   - timeout (handled by env.time_out_buf)
-        #   - hard joint limit violation (any joint at limit AND tracking)
         #   - termination_contact (excessive contact force on non-foot bodies)
+        #     with grace period after reset (skip first N steps to avoid
+        #     PD-startle: fallen poses + init_pd_target=ref produces huge
+        #     transient force when PD pulls joints toward standing while body
+        #     is still on ground)
         time_out = torch.unsqueeze(self.env.time_out_buf, 1)
+        thresh = getattr(self.cfg.task, 'termination_contact_force_threshold', None)
+        thresh = float(thresh) if thresh is not None else 100.0
+        grace = getattr(self.cfg.task, 'termination_grace_steps', None)
+        grace = int(grace) if grace is not None else 30  # ~0.45s at 0.015s policy dt
         con_over = torch.any(
             torch.norm(
                 self.env.contact_forces[:, self.env.termination_contact_indices, :],
                 dim=-1, keepdim=True,
-            ) > 100.0,  # tolerate normal ground contact with body
+            ) > thresh,
             dim=1,
         )
+        # Mask out termination during the grace period after reset
+        in_grace = (self.env.episode_length_buf < grace).unsqueeze(-1)
+        con_over = con_over & ~in_grace
         done = time_out | con_over
 
         # Curriculum bookkeeping: when an env finishes, record success/failure.
@@ -782,6 +812,28 @@ class RecoveryTask(NullTask):
             components += [w_lim * limit_pen, w_con * contact_pen]
             names += ['joint_limit', 'contact_force']
 
+        # ─── Impact penalties (always-on when weight ≠ 0; not gated by safety) ─
+        # Targets the actual sim2real concern (motor wear, mechanical shock).
+        # Independent of the safety group above so they can be used even when
+        # safety is disabled — useful when contact-termination is relaxed and
+        # we want a reward signal to discourage hardware-damaging slams.
+        w_foot_imp = float(self.rew_weights.get('foot_impact_pen', 0.0))
+        if w_foot_imp != 0.0:
+            foot_max = self.env.foot_frc.max(dim=1, keepdim=True).values
+            foot_imp_excess = (foot_max - 100.0).clip(min=0., max=2000.)
+            components.append(w_foot_imp * foot_imp_excess)
+            names.append('foot_impact')
+
+        w_body_imp = float(self.rew_weights.get('body_impact_pen', 0.0))
+        if w_body_imp != 0.0:
+            body_cf = torch.norm(
+                self.env.contact_forces[:, self.env.termination_contact_indices, :],
+                dim=-1)
+            body_max = body_cf.max(dim=1, keepdim=True).values if body_cf.numel() else torch.zeros_like(self.env.foot_frc[:, :1])
+            body_imp_excess = (body_max - 100.0).clip(min=0., max=2000.)
+            components.append(w_body_imp * body_imp_excess)
+            names.append('body_impact')
+
         # ─── Terminal reward (applied only on the last step of episode) ───
         # Continuous pose match against ref_joint_pos: penalizes "upright but
         # squatting" sinks where height/tilt are partially satisfied without
@@ -803,9 +855,13 @@ class RecoveryTask(NullTask):
             components = [zero]
             names = ['zero']
 
-        # Per-component rewards × dt, clipped (same convention as BIRLTask).
+        # Per-component rewards × dt. Clip widened from BIRL's [-4, +5] to
+        # [-100, +20] so impact penalties (body slams 2000N+ with bigger
+        # weights) can actually fire instead of being capped at -4/sec.
+        # Wide bounds prevent NaN from runaway, narrower clips would
+        # dilute the safety signal.
         rew = torch.cat(
-            [torch.clip(c, min=-4., max=5.) * self.env.dt for c in components],
+            [torch.clip(c, min=-100., max=20.) * self.env.dt for c in components],
             dim=1,
         )
         self.rew_names = names
@@ -827,6 +883,16 @@ class RecoveryTask(NullTask):
         # (Per-layer reward means are already logged via task.rew_names in train.py.)
         if hasattr(self, '_last_is_upright') and self._last_is_upright is not None:
             out['recovery/upright_frac'] = self._last_is_upright.float().mean()
+        # Per-episode max impact peaks — body (for exploit detection) and
+        # foot (for slam diagnosis). Tracks the worst impact within each
+        # ongoing episode; per-step impact rewards get diluted in 533-step
+        # averaging, but these maxes show the actual peaks.
+        if hasattr(self, '_episode_max_body_frc'):
+            out['recovery/body_frc_max_running'] = self._episode_max_body_frc.mean()
+            out['recovery/body_frc_max_worst'] = self._episode_max_body_frc.max()
+        if hasattr(self, '_episode_max_foot_frc'):
+            out['recovery/foot_frc_max_running'] = self._episode_max_foot_frc.mean()
+            out['recovery/foot_frc_max_worst'] = self._episode_max_foot_frc.max()
         # Curriculum stats.
         if self._curriculum is not None:
             cinfo = self._curriculum.info()

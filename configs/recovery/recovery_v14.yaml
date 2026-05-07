@@ -1,0 +1,38 @@
+# Recovery v14 — re-introduce smoothness + tighter impact penalties.
+#
+# v13 result: 99% on n=200 mixed pool, 100% on prone (huge unlock from v6's
+# 56%) — but ttu=0.84s on prone (too fast / ballistic), τpeak=3.31× sustained
+# (hardware-stressful), foot_F up to 572N (11× body weight on impact).
+#
+# Hypothesis: v9's smoothness penalties broke recovery because TERMINATION
+# (100N cap) was the bottleneck, not smoothness per se. Now that termination
+# is removed (v13), plain smoothness penalties should slow + clean the
+# motion without losing recovery skill. Test by adding them back at quarter
+# of v9's weights, with NO upright-only mask (the mask was a workaround for
+# the termination-induced trap).
+#
+# Targets vs v13:
+#   ttu (prone)       0.84s    → 1.5-2.0s   (slower, more controlled)
+#   τpeak/eff         3.31×    → ≤2.0×      (less duty cycle)
+#   foot_F worst      572N     → ≤300N
+#   jerk              5.19     → ≤2.5
+#   success           99%      → keep ≥95%  (don't lose recovery)
+#
+# Resume from v13 @1500 (best deploy ckpt) via --init_only to keep the
+# learned actor + critic but reset Adam (different reward gradient).
+_base: recovery/recovery_modern_base.yaml
+
+algorithm:
+  # Slightly tighter σ for cleaner motion than v13's wide policy
+  entropy_coef: 0.005
+
+reward:
+  # Quarter of v9's full weights. NO upright-only mask.
+  action_rate:           -0.005
+  action_jerk:           -0.005
+  joint_vel_pen:         -0.0003
+  torque_pen:            -0.00005
+  torque_smooth_sat_pen: -0.002
+  # Tighter impact pens (2× v13) — push toward smaller peaks
+  foot_impact_pen: -0.002
+  body_impact_pen: -0.001

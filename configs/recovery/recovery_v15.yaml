@@ -1,0 +1,56 @@
+# Recovery v15 — aggressive torque + impact penalties, from scratch.
+#
+# v14 result (init_only from v13): action jerk 6× cleaner (5.22 → 0.87),
+# success held 99%, BUT torque (τpeak 2.5-2.7× rated) and foot impact
+# (370N) didn't budge. Action-smoothness penalties don't bound torque
+# magnitude — PD can produce high torque from smooth-but-aggressive
+# joint targets.
+#
+# v15 strategy: hit torque + impact directly, hard. Train from scratch
+# (no v13/v14 weight inheritance) so policy never learns ballistic
+# strategies that need to be unlearned.
+#
+# Aggressive torque pens:
+#   torque_smooth_sat_pen:  -0.02   (10× v14's -0.002, was -0.05 in v3 [too strong])
+#   torque_excess_pen:      -0.05   (NEW — penalize anything above 1.0× rated)
+#   torque_norm_sq_pen:     -0.005  (NEW — soft normalized-squared, always-on)
+#
+# Aggressive impact pens:
+#   foot_impact_pen:        -0.005  (2.5× v14)
+#   body_impact_pen:        -0.002  (2× v14)
+#
+# Action smoothness kept gentle (v14 levels) — was working.
+#
+# Targets vs v13/v14:
+#   τpeak/eff:    2.5×    → ≤1.5×       (sustained; the sim2real concern)
+#   max τpeak:    6.5×    → ≤3×
+#   foot_F worst: 572N    → ≤200N
+#   ttu (prone):  0.84s   → 1.5-2.5s    (slower / quasi-static-ish)
+#   success:      99%     → ≥90%        (don't lose recovery)
+#
+# Risk: aggressive torque pens might prevent recovery learning entirely
+# (v3-v5 failure mode). If sim2sim@1500 is below 70%, anneal pens down.
+_base: recovery/recovery_modern_base.yaml
+
+algorithm:
+  entropy_coef: 0.005
+
+reward:
+  # MUCH stronger height pull to escape the lying-still local optimum that
+  # v15 (initial config) got stuck in. Per-step height reward at upright
+  # (z=0.43) jumps from +3.7 to +14.9; at lying (z=0.17) from +0.27 to +1.07.
+  # Gap from 3.4 to 13.9 → policy strongly prefers any motion that raises z.
+  height:        16.0       # was 4.0
+  pose_match:    2.0        # unchanged (already inherited)
+  # Action smoothness — gentle, kept from v14 since it worked
+  action_rate:           -0.005
+  action_jerk:           -0.005
+  joint_vel_pen:         -0.0003
+  torque_pen:            -0.0001
+  # Torque shape — aggressive
+  torque_smooth_sat_pen: -0.02
+  torque_excess_pen:     -0.05
+  torque_norm_sq_pen:    -0.005
+  # Impact — aggressive
+  foot_impact_pen:       -0.005
+  body_impact_pen:       -0.002

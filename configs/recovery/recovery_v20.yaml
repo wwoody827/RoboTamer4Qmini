@@ -1,0 +1,67 @@
+# Recovery v20 — clean from-scratch with all v15-v19 lessons + sim2real prep.
+#
+# NOT a fine-tune. Clean experiment that validates every design decision
+# trains together end-to-end:
+#   - threshold-only torque pens (v18 user insight: never penalize baseline)
+#   - wider pose_match Gaussian k=1, w=3 (v19 fix: keep gradient alive)
+#   - sat_linear height with floor (modern_base)
+#   - no contact termination (v13 onward)
+#   - mirror + history=3 skip=4 (modern_base)
+#   - pool_curriculum balance→fallen ramp (modern_base)
+#
+# NEW for v20 (sim2real readiness):
+#   - push_robots: true                  random ~0.5 m/s pushes every 3s
+#   - delay_observation: true            10-40 step joint delay, 20-50 step IMU
+#                                        (main sim2real bridge — without this,
+#                                        v13/v19 policies likely brittle in real)
+#   - stronger action smoothness:        action_rate/jerk -0.005 (2× v19)
+#                                        targets ttu in 1.5-2s range (BD_X-like)
+#                                        instead of v19's converged 0.78s ballistic
+#
+# Targets vs v19:
+#   success ≥ 95% on n=200 mixed pool
+#   ttu prone: 1.5-2.0s (vs v19's 0.78s — slower, controlled)
+#   τpeak/eff: ≤2.0× sustained (deployable)
+#   foot_F worst: ≤300N
+#   robust to pushes during episode (new test)
+#
+# Risk: harder problem (push + obs delay) may take more iters to converge.
+# Budget 12000 iters (vs v13/v19's 8000) for safety.
+_base: recovery/recovery_modern_base.yaml
+
+algorithm:
+  entropy_coef: 0.005
+
+domain_rand:
+  push_robots: true                # was false
+  max_push_vel_xy: 0.5
+  max_push_rate_xyz: 0.5
+  push_interval_s: 3.0
+  delay_observation: true          # was false — sim2real bridge
+  delay_joint_ranges: [10, 40]
+  delay_rate_ranges: [20, 50]
+  delay_angle_ranges: [20, 50]
+
+reward:
+  # Positive — same as v19
+  height:        5.0
+  pose_match:    3.0
+  pose_match_k:  1.0
+  orientation:   0.7
+  stability:     1.5
+
+  # Action smoothness — STRONGER (2× v19) to slow ttu toward 1.5s
+  action_rate:           -0.005
+  action_jerk:           -0.005
+
+  # Threshold-only torque pens — v18 design
+  torque_pen:            0
+  torque_smooth_sat_pen: 0
+  joint_vel_pen:         0
+  torque_norm_sq_pen:    0
+  torque_sat_pen:        -0.005
+  torque_excess_pen:     -0.5
+
+  # Impact pens — same as v18/v19
+  foot_impact_pen:       -0.003
+  body_impact_pen:       -0.002

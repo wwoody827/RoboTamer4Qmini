@@ -1,0 +1,21 @@
+# Recovery v22 — v21 + termination grace period.
+#
+# v21 result @1912: PD-startle hypothesis confirmed.
+#   mean_episode_time dropped 6.95s → 4.95s when curriculum hit 40/30/30
+#   body_frc_max_worst spiked back to 10500N
+#   upright_fallen barely above 0% (7%)
+#
+# Diagnosis: fallen pose + init_pd_target=ref → PD instantly tries to pull
+# joints to nominal stand → legs fight ground → 10000N+ body force on
+# step 1-2 → episode terminates immediately. Fallen poses get zero
+# learning opportunity.
+#
+# Fix: termination_grace_steps=30 (~0.45s) — skip contact-termination
+# check for first 30 policy steps after reset. Lets PD startle settle
+# without killing the episode. Real slams from policy actions still
+# terminate after the grace period.
+_base: recovery/recovery_v21.yaml
+
+task:
+  termination_grace_steps: 30   # ~0.45s at 0.015s policy_dt
+                                # protects against PD-startle on fallen reset

@@ -1,0 +1,29 @@
+# Recovery v13 — full strategy freedom + impact penalty.
+#
+# Skip v11 (drop knee from termination) and v12 (raise threshold to 300N)
+# in favor of the strongest version: NO contact termination at all.
+# Hypothesis: the 100N termination calibrated for the walking task has
+# been forcing dynamic-only recovery. Removing it lets the policy explore
+# any strategy — kneeling rises, rolls, hip pivots, all-fours stands.
+#
+# Hardware concern (slamming) moves from termination → reward penalty:
+#   foot_impact_pen: peak |F| at feet above 100N, capped at 500N excess
+#   body_impact_pen: same for non-foot bodies (since we no longer terminate)
+# Gentle weights (-0.001) so they shape behavior without forbidding it.
+#
+# Resume from v10 @8000 (full --resume; same modern feature set).
+#
+# NIT: this is a 6-deep inheritance chain (v13 → v10 → v9 → balance_v2 →
+# balance_v1 → recovery). Future: flatten into a recovery_modern_base.yaml
+# that v10/v13/etc inherit from directly.
+_base: recovery/recovery_v10.yaml
+
+# Keep termination body list populated (so body_impact_pen has something to
+# monitor) but raise the threshold so high it effectively never triggers.
+# 1e5 N is ~2000× body weight — physically impossible.
+task:
+  termination_contact_force_threshold: 100000.0
+
+reward:
+  foot_impact_pen: -0.001
+  body_impact_pen: -0.0005

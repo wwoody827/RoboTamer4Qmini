@@ -1,0 +1,59 @@
+# Recovery v18 — only threshold-based penalties; static stand pays zero.
+#
+# v17 lesson + user insight: torque_pen (Σ τ²) and torque_smooth_sat_pen
+# (which is non-zero even at τ=0.5×τmax) penalize the baseline torque
+# needed to hold static stance against gravity. Policy biased toward lying
+# because lying = no penalty, standing = baseline penalty.
+#
+# v18 design: REMOVE all baseline-firing penalties. Keep only threshold-
+# based "soft barriers" — gentle linear ramp above 80% rated, sharp
+# quadratic above 100%.
+#
+# At STATIC STAND (joints holding 5-15Nm vs τmax 30Nm):
+#   ALL torque/motion penalties = 0
+#
+# At ATTEMPTED PUSH (active recovery, transient peaks):
+#   torque_sat: gentle warning above 80% (linear)
+#   torque_excess: sharp deterrent above 100% (quadratic, weight 0.5)
+#   foot_impact: penalty above 100N peak
+#   body_impact: penalty above 100N peak
+#
+# EV (per-sec):
+#   Standing:        +8.15
+#   Lying still:     +0.56
+#   Mid-recovery:    +2.91 (positive — progress is rewarded)
+#   Failed slam:     -1.14 (negative — penalized)
+# Standing - lying differential: +7.59 — strong pull.
+# Crossover for "try" worth it: ~17% success rate.
+_base: recovery/recovery_modern_base.yaml
+
+algorithm:
+  entropy_coef: 0.005
+
+reward:
+  # Positive — height max under clip, modest others
+  height:        5.0
+  pose_match:    1.5
+  orientation:   0.7
+  stability:     1.5
+
+  # Action smoothness — fires only during motion, doesn't bias static
+  action_rate:           -0.0025
+  action_jerk:           -0.0025
+
+  # Removed: penalize-all-torque terms
+  torque_pen:            0
+  torque_smooth_sat_pen: 0
+  joint_vel_pen:         0
+  torque_norm_sq_pen:    0
+
+  # Soft-barrier torque pens — zero below threshold
+  torque_sat_pen:        -0.005   # linear above 80% rated
+  torque_excess_pen:     -0.5     # quadratic above 100% rated, BUMPED 10× from initial -0.05
+                                   # At τ=2×τmax: penalty -0.5/sec (sharp)
+                                   # At τ=1.5×τmax: -0.125/sec
+                                   # At τ=1.1×τmax: -0.005/sec (mild)
+
+  # Impact penalties — already threshold-based (clipped above 100N)
+  foot_impact_pen:       -0.003
+  body_impact_pen:       -0.002

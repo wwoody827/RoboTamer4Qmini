@@ -1,0 +1,20 @@
+# Recovery v23 — close the grace-period exploit + eliminate PD startle.
+#
+# v22 result: grace=30 prevents PD-startle terminations BUT body_frc_max_worst
+# still hit 8669N. Two failure modes:
+#   A. Grace-window exploit: 450ms with no termination → policy slams
+#      body for free reactive force during grace
+#   B. PD startle persistent: PD tries to pull fallen joints to nominal
+#      stand → body force stays elevated for full 450ms
+#
+# v23 attacks both:
+#   1. termination_grace_steps: 30 → 5 (5 policy steps = 75ms ≈ 5 sim
+#      time-constants for joint PD settling). Closes exploit window.
+#   2. init_pd_target: 'ref' → 'sampled' (PD initial target = current
+#      sampled pose → ZERO PD force at init → no startle to begin with).
+#      Policy gradually commands away from sampled toward standing.
+_base: recovery/recovery_v22.yaml
+
+task:
+  init_pd_target: sampled       # was 'ref' — eliminates PD startle on fallen reset
+  termination_grace_steps: 5    # was 30 — minimal protection (~75ms), closes exploit window

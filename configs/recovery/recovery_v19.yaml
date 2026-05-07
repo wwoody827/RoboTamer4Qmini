@@ -1,0 +1,23 @@
+# Recovery v19 — fix pose_match dead-gradient.
+#
+# v18 result: ever_upright_rate=0.49 (robot reaches upright spatially) but
+# success_rate=0 because pose_err=2.11 (way above 0.30 threshold).
+#
+# Root cause: pose_match = 1.5 × exp(-4 × pose_err²). At pose_err=2.11:
+#   reward = 1.5 × exp(-17.8) = 1e-7
+#   gradient ≈ 0
+# Policy gets ZERO signal that "smaller pose_err is better" — Gaussian
+# tail is dead.
+#
+# v19 fix: broader Gaussian (k=4→1) + bigger weight (1.5→3.0).
+#   pose_err=2.11: 3.0 × exp(-4.45) = 0.035 (small but real gradient)
+#   pose_err=1.00: 3.0 × exp(-1.00) = 1.10 (good signal)
+#   pose_err=0.30: 3.0 × exp(-0.09) = 2.74 (peak)
+#
+# Resume from v18 @2000 (init_only) — keep the half-up posture v18 found,
+# add real gradient to refine joint configuration.
+_base: recovery/recovery_v18.yaml
+
+reward:
+  pose_match:    3.0     # was 1.5 (2× boost)
+  pose_match_k:  1.0     # was 4.0 (broader Gaussian)

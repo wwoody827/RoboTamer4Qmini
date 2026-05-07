@@ -1,0 +1,40 @@
+# Recovery v16 — middle ground: 4× height boost + moderate torque pens.
+#
+# v15 lessons:
+#   - Aggressive torque pens (torque_excess -0.05, torque_norm_sq -0.005,
+#     smooth_sat -0.02) prevent balance learning from scratch — policy
+#     gets stuck in lying-still local optimum (z=0.17m, never stands)
+#   - Even with 4× height boost (weight 16), policy can't escape
+#   - Confirmed v3-v5 failure mode: torque-too-strict from scratch
+#
+# v16 strategy: keep height boost (proven helpful), drop the NEW aggressive
+# pens (torque_excess, torque_norm_sq), bring smooth_sat to v14 level.
+# Hardware-relevant signal kept via impact pens at modest weights.
+#
+# Targets:
+#   Successfully learn balance from scratch
+#   τpeak/eff:    target ≤2.0× sustained (deployable on real motors)
+#   max τpeak:    target ≤4×
+#   foot_F worst: target ≤300N
+#   ttu (prone):  target 1.0-2.0s
+#   success:      target ≥90%
+_base: recovery/recovery_modern_base.yaml
+
+algorithm:
+  entropy_coef: 0.005
+
+reward:
+  height:        16.0       # 4× boost (modern_base default 4.0); strong pull from lying
+  pose_match:    2.0
+  # Action smoothness — gentle, kept (v14 levels)
+  action_rate:           -0.005
+  action_jerk:           -0.005
+  joint_vel_pen:         -0.0003
+  torque_pen:            -0.0001
+  # Torque shape — moderate (v14 level, not v15's aggressive)
+  torque_smooth_sat_pen: -0.005   # was -0.02 in v15 (4× weaker now)
+  # NO torque_excess_pen (was -0.05 in v15) — too strict from scratch
+  # NO torque_norm_sq_pen (was -0.005 in v15) — too strict from scratch
+  # Impact — moderate
+  foot_impact_pen:       -0.003   # between v14 (-0.002) and v15 (-0.005)
+  body_impact_pen:       -0.002

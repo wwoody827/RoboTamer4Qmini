@@ -1,0 +1,16 @@
+# Recovery v12 — raise termination contact-force threshold from 100N → 300N.
+#
+# Less structural change than v11 (which dropped "knee" entirely). This
+# keeps all 9 bodies (knee/base/hip×3) in the termination list but lets
+# brief contact peaks happen (e.g., knee transiently hitting ground at
+# 200N during a pivot) without killing the episode.
+#
+# 300N ≈ 6× body weight peak — clearly in "this body shouldn't sustain
+# this" territory but allows transient peaks that quasi-static motions
+# would naturally produce.
+#
+# Resume from v10 @8000.
+_base: recovery/recovery_v10.yaml
+
+task:
+  termination_contact_force_threshold: 300.0   # was 100.0 default

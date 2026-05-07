@@ -31,13 +31,11 @@
 _base: recovery/recovery_v9.yaml
 
 algorithm:
-  # 7× higher than balance_v1's 0.003. v9 video diagnosis showed σ collapsed
-  # to ~0.075 with deterministic-attractor failure (4/4 supine identical).
-  # 0.02 keeps σ substantially wider through training so policy explores
-  # action space and can stumble onto successful get-up trajectories.
-  # Comparable to BD_X (0.01) and DeepMimic (~0.01) but pushed higher because
-  # the failure here is specifically exploration collapse on hard subsets.
-  entropy_coef: 0.02
+  # Bumped from balance_v1's 0.003 (which let v9 collapse to σ=0.075). Initial
+  # try at 0.02 was too aggressive — σ climbed past 1.1 by iter 125 (action
+  # noise drowning policy signal). 0.01 matches BD_X / DeepMimic; should
+  # equilibrate σ at ~0.3-0.6, the sweet spot.
+  entropy_coef: 0.01
 
 reward:
   action_rate:           0.0

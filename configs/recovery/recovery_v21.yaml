@@ -1,0 +1,43 @@
+# Recovery v21 — close the body-slam exploit loophole.
+#
+# v20 result: 100% sim2sim success but body force peaks at 581N mean /
+# 2049N worst-case during recovery. Brief 1-2ms spikes above 1000N are
+# the policy exploiting MuJoCo's constraint solver to launch upward off
+# its knee/hip.
+#
+# Per-step body_impact_pen at -0.002 weight × clip(force-100, 0, 500)
+# only contributes ~-0.002/step averaged over 533 steps. Brief spikes
+# get diluted away.
+#
+# Train.py per-component reward clip at [-4, +5] per second prevents
+# bumping weight from solving the dilution: even -0.05 weight gets
+# capped at -4/sec ≈ -0.06/step. Negligible vs the +6-9 dense reward.
+#
+# Fix: bring back contact-force termination at HIGH threshold (1000N =
+# 20× body weight). Catches only the exploit slams, allows brief
+# kneeling/hip contact at <1000N for legitimate recovery strategies.
+# Termination provides a single, unmissable signal at episode level
+# rather than diluted per-step penalty.
+#
+# Otherwise identical to v20 (clean from-scratch with all sim2real
+# features: push, delay_obs, mirror, history, sat_linear height,
+# wider pose Gaussian, threshold-only torque pens).
+_base: recovery/recovery_v20.yaml
+
+task:
+  termination_contact_force_threshold: 500.0    # was 100000.0 (effectively off)
+                                                 # 500N = 10× body weight (50N)
+                                                 # catches aggressive push-off / slam strategies
+                                                 # allows controlled body contact (<300N) for
+                                                 # legitimate kneeling/quasi-static recovery
+
+reward:
+  # Bigger impact penalty weights — paired with widened reward clip
+  # ([-100, +20] now in recovery_task.py) and inner clip raised
+  # (excess up to 2000N now). At body_force=2000N, weight=-0.05:
+  #   excess = clip(1900, 0, 2000) = 1900
+  #   penalty = -0.05 × 1900 = -95/sec → clipped to -100/sec (no clip)
+  #   per-step = -1.42 → significant cost per slam moment
+  # vs prior v20: -0.002 weight × 500 cap × clip-to-(-4) = -0.06/step
+  foot_impact_pen: -0.02      # was -0.003 in v20 (~7× stronger)
+  body_impact_pen: -0.05      # was -0.002 in v20 (25× stronger)

@@ -1,0 +1,83 @@
+# Modern recovery base — flat config that captures all the post-v9 design
+# decisions in one place. Anything starting from v10+ should inherit from
+# THIS file directly (single layer), not chain through v9 → balance_v2 →
+# balance_v1 → recovery.yaml.
+#
+# Captures:
+#   - obs history=3, skip=4 (120ms span, BD_X-style temporal context)
+#   - mirror enabled (Phase-4 generic slot Mirror)
+#   - pool curriculum (balance/tilted/fallen ratio schedule, default 100%
+#     balance until 500, ramp to 30/30/40 by 5000)
+#   - sat_linear height (zero below floor, linear to target)
+#   - no contact termination (threshold 1e5 N effectively disabled)
+#   - 8s episodes (matches v6/v7/v8 for fallen recovery budget)
+#   - foot/body impact penalties (graduated hardware-safety signal)
+#   - shaping_static + smoothness + terminal reward groups
+#
+# Specific experiments (v14, v15...) override only what they're testing.
+_base: recovery/recovery.yaml
+
+task:
+  init_states_path: data/recovery_init_states_mixed.npz
+  init_pd_target: ref
+  termination_contact_force_threshold: 100000.0   # effectively disabled
+  pool_curriculum:
+    enabled: true
+    schedule:
+      - iter: 0
+        weights: {balance: 1.0, tilted: 0.0, fallen: 0.0}
+      - iter: 500
+        weights: {balance: 1.0, tilted: 0.0, fallen: 0.0}
+      - iter: 1500
+        weights: {balance: 0.4, tilted: 0.3, fallen: 0.3}
+      - iter: 3000
+        weights: {balance: 0.2, tilted: 0.3, fallen: 0.5}
+
+observation:
+  history: 3
+  skip: 4
+  slots:
+    - base_euler
+    - base_ang_vel
+    - joint_pos_err
+    - joint_vel
+    - joint_tracking_err
+    - projected_gravity
+
+action:
+  action_lowpass_alpha: 0.3
+
+runner:
+  episode_length_s: 8
+  use_mirror_augmentation: true
+  mirror_weight: 0.5
+
+algorithm:
+  entropy_coef: 0.01
+
+reward:
+  groups_enabled:
+    - shaping_static
+    - stability
+    - smoothness
+    - terminal
+  pose_match:    2.0
+  pose_match_k:  4.0
+  orientation:   1.0
+  orientation_k: 0.5
+  height:        4.0
+  height_shape:  sat_linear
+  height_floor:  0.15
+  stability:     2.0
+  # Smoothness / torque penalties: zero by default (the v10/v13 stage-A
+  # baseline). Specific configs can override to introduce gentle penalties.
+  action_rate:           0.0
+  action_jerk:           0.0
+  joint_vel_pen:         0.0
+  torque_pen:            0.0
+  torque_smooth_sat_pen: 0.0
+  smoothness_upright_only: false
+  # Impact penalties: graduated hardware-safety signal that replaces the
+  # binary contact-termination from the walking task.
+  foot_impact_pen: -0.001
+  body_impact_pen: -0.0005

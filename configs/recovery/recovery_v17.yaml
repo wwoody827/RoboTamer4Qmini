@@ -1,0 +1,55 @@
+# Recovery v17 — relative scaling instead of clipped boosting.
+#
+# v16 lesson: bumping height to 16 was wasted because train.py clips each
+# reward component at +5/sec. Effective height ceiling is 5/sec hit at
+# z ≈ 0.24m. So weight=16 only gave a marginal gain over weight=4.
+#
+# v17 strategy: keep height JUST under the clip (weight 5) for max raw
+# value, then HALVE other positive rewards AND penalties. This makes
+# height the dominant signal in relative terms without hitting the clip,
+# AND reduces exploration cost so policy can try standing without paying
+# heavy torque tax.
+#
+# Lying-still EV (z=0.17, tilt=90° = lying flat):
+#   height:      5.0 × (0.17-0.15)/0.30 = 0.33
+#   orientation: 0.7 × exp(-0.5·(π/2)²) = 0.20
+#   pose:        ~0
+#   stability:   0
+#   total:       ~0.5/sec
+#
+# Standing EV (z=0.43, tilt=2°, pose_err=0.2):
+#   height:      5.0 × (0.43-0.15)/0.30 = 4.67
+#   orientation: 0.7 × exp(-0.5·(2°)²) ≈ 0.70
+#   pose:        1.5 × exp(-4·0.04) ≈ 1.28
+#   stability:   1.5
+#   total:       ~8.15/sec
+#
+# Differential: 7.65/sec strongly pulls toward standing.
+#
+# Penalties halved from v16:
+#   action_jerk         -0.0025  (was -0.005)
+#   torque_smooth_sat   -0.0025  (was -0.005)
+#   foot_impact         -0.0015  (was -0.003)
+#   body_impact         -0.001   (was -0.002)
+# Per-step penalty during active motion: ~-0.005-0.01 — small enough that
+# exploration steps still net positive when height reward kicks in.
+_base: recovery/recovery_modern_base.yaml
+
+algorithm:
+  entropy_coef: 0.005
+
+reward:
+  # Positive rewards — height boosted to clip-limit, others halved
+  height:        5.0       # was 4 (modern_base default), 16 (v15/v16)
+  pose_match:    1.5       # was 2.0
+  orientation:   0.7       # was 1.0
+  stability:     1.5       # was 2.0
+
+  # Penalties — halved from v16
+  action_rate:           -0.0025
+  action_jerk:           -0.0025
+  joint_vel_pen:         -0.00015
+  torque_pen:            -0.00005
+  torque_smooth_sat_pen: -0.0025
+  foot_impact_pen:       -0.0015
+  body_impact_pen:       -0.001

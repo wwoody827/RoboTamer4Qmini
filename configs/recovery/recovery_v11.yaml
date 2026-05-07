@@ -1,0 +1,22 @@
+# Recovery v11 — drop "knee" from termination contact list.
+#
+# Diagnosis (post v10): policy was forced into purely-dynamic ballistic
+# recovery because terminate_after_contacts_on=["knee","base","hip"] with
+# 100N threshold meant ANY knee contact >100N killed the episode. This
+# blocked all "kneeling-rise" strategies and forced the policy to keep
+# torso/knees in flight while only the feet touched ground. Effectively,
+# the configuration mandated dynamic recovery.
+#
+# v11 hypothesis: removing "knee" from the termination list lets the policy
+# discover knee-supported intermediate poses (kneeling, all-fours), which
+# enable more quasi-static get-up strategies. Knees are designed for ground
+# contact in this morphology.
+#
+# v12 will instead raise the threshold from 100N → 300N (keep all 3 bodies
+# in list) — a less structural change. Compare both.
+#
+# Resume from v10 @8000 (full --resume; same reward shape).
+_base: recovery/recovery_v10.yaml
+
+asset:
+  terminate_after_contacts_on: ["base", "hip"]   # was ["knee","base","hip"]
