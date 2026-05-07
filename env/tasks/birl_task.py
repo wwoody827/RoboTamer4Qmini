@@ -378,6 +378,35 @@ class BIRLTask(NullTask):
                 yaw_lo, yaw_hi, (n, 1), device=self.device
             ).squeeze(1)
 
+        # Optional regime restriction — never sample certain (vx,vy,yaw) combinations.
+        # Supported regimes:
+        #   'vx_vy_or_vx_yaw': 50% mode A (vx+vy, yaw=0) / 50% mode B (vx+yaw, vy=0).
+        #   'pure_and_pairs': 50% pure single-dim cmd, 25% vx+vy, 25% vx+yaw.
+        #     Pure modes are split equally among (vx, vy, yaw) → ~16.7% each.
+        #     Matches typical deploy distribution where single-dim cmds are most
+        #     common, but still trains the useful pair combos.
+        regime = getattr(self.cfg.command, 'regime', None)
+        if regime == 'vx_vy_or_vx_yaw':
+            is_vy_mode = torch.rand(n, device=self.device) < 0.5
+            self.commands[env_ids[is_vy_mode], 2] = 0    # mode A: zero yaw
+            self.commands[env_ids[~is_vy_mode], 1] = 0   # mode B: zero vy
+        elif regime == 'pure_and_pairs':
+            # mode 0: pure_vx, 1: pure_vy, 2: pure_yaw, 3: vx+vy, 4: vx+yaw
+            weights = torch.tensor([1/6, 1/6, 1/6, 1/4, 1/4], device=self.device)
+            mode = torch.multinomial(weights, n, replacement=True)
+            # Pure: zero the other two dims
+            self.commands[env_ids[mode == 0], 1] = 0     # pure_vx → vy=0
+            self.commands[env_ids[mode == 0], 2] = 0     # pure_vx → yaw=0
+            self.commands[env_ids[mode == 1], 0] = 0     # pure_vy → vx=0
+            self.commands[env_ids[mode == 1], 2] = 0     # pure_vy → yaw=0
+            self.commands[env_ids[mode == 2], 0] = 0     # pure_yaw → vx=0
+            self.commands[env_ids[mode == 2], 1] = 0     # pure_yaw → vy=0
+            # Pairs: zero the third dim
+            self.commands[env_ids[mode == 3], 2] = 0     # vx+vy → yaw=0
+            self.commands[env_ids[mode == 4], 1] = 0     # vx+yaw → vy=0
+        elif regime is not None:
+            raise ValueError(f"Unknown command.regime: {regime!r}")
+
         # Phase frequency command (phase.mode == 'input' only): sample per env.
         # Training signal: policy must handle any freq in [freq_low, freq_high].
         if self._cmd_freq is not None:
@@ -691,13 +720,16 @@ class BIRLTask(NullTask):
 
         balance_rew = 0.5 * (base_heit_rew * torch.exp(-torch.clip(5. / lin_vel_x_norm, min=2, max=8.) * torch.norm(self.env.base_euler[:, :2], dim=-1, keepdim=True)) + 1.)
 
-        forward_vel_rew = torch.exp(-torch.clip(5. / lin_vel_x_norm, min=2., max=10.) * (
-                self.commands[:, [0]] - self.env.base_lin_vel[:, [0]]) ** 2) #* balance_rew
-        lateral_vel_rew = torch.exp(-torch.clip(5. / lin_vel_x_norm, min=3., max=15.) * (self.commands[:, [1]] - self.env.base_lin_vel[:, [1]]) ** 2)
+        # Linear cmd-tracking reward: r = 1 - clip(α·|err|, 0, 1.5).
+        # Peaks at +1, bottoms at -0.5. Constant gradient → never dies in tail
+        # (Gaussian was giving ~50% reward at err=0.4 → no learning pressure).
+        fwd_err     = torch.abs(self.commands[:, [0]] - self.env.base_lin_vel[:, [0]])
+        lateral_err = torch.abs(self.commands[:, [1]] - self.env.base_lin_vel[:, [1]])
+        yaw_err     = torch.abs(self.commands[:, [2]] - self.env.base_ang_vel[:, [2]])
 
-        yaw_rate_rew = torch.exp(-torch.clip(2. / yaw_rate_norm, min=2., max=6.) * (self.commands[:, [2]] - self.env.base_ang_vel[:, [2]]) ** 2)
-
-        lateral_vel_rew += -0.6 / lin_vel_x_norm * torch.abs(self.commands[:, [1]] - self.env.base_lin_vel[:, [1]]) * self.static_flag
+        forward_vel_rew = 1.0 - torch.clip(2.0 * fwd_err,     min=0., max=1.5)
+        lateral_vel_rew = 1.0 - torch.clip(3.0 * lateral_err, min=0., max=1.5)
+        yaw_rate_rew    = 1.0 - torch.clip(2.0 * yaw_err,     min=0., max=1.5)
 
         ang_vel_rew = torch.exp(
             -torch.clip(2. / lin_vel_x_norm, min=0.7, max=6.) * torch.norm(self.env.base_ang_vel[:, :2], dim=1,

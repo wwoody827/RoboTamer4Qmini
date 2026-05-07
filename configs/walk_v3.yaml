@@ -1,0 +1,20 @@
+# walk_v3 — restrict cmd sampling to (vx + vy) OR (vx + yaw), never all three.
+#
+# Motivation: walk_v2 (linear reward + bumped weights) showed metrics oscillating
+# instead of converging — fwd/bwd/yaw fighting each other for reward budget. The
+# physically demanding "vx + vy + yaw simultaneously" case is what makes the joint
+# distribution hard. Bipeds rarely strafe + turn at once anyway.
+#
+# Each env per-resample is randomly assigned:
+#   mode A: (vx, vy)  — 2D translation, yaw forced to 0
+#   mode B: (vx, yaw) — forward + turning, vy forced to 0
+# vy and yaw never coexist. vx is always present (in both modes).
+#
+# Deploy implications:
+#   ✓ pure vx, pure vy, pure yaw, vx+vy, vx+yaw all in-distribution
+#   ✗ vy+yaw (sidestep + turn) → OOD
+#   ✗ vx+vy+yaw → OOD
+_base: walk_v2.yaml
+
+command:
+  regime: vx_vy_or_vx_yaw

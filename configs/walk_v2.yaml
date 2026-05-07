@@ -1,0 +1,21 @@
+# walk_v2 — linear cmd-tracking reward + bumped weights.
+#
+# Motivation: walk_v1 (= bdx_slim_v3) had vx_err≈0.4, yaw_err≈0.45 (90% off).
+# Root cause: Gaussian reward gave policy ~35-58% credit at err=0.4 → no
+# learning pressure. tracking only ~20% of total task_rew budget; survive
+# rewards dominated.
+#
+# Changes (vs bdx_slim_v3):
+#   1. birl_task.py: fwd/lateral/yaw_rate rewards → linear (1 - α·|err|).
+#      Constant gradient at any err, no dead tail, no inverted Gaussian
+#      scaling.
+#   2. Bumped weights so cmd tracking is ~40% of task_rew, not 20%:
+#        fwd_vel:    2.3 → 5.0   (× 2.2)
+#        yaw_rat:    2.5 → 5.0   (× 2.0)
+#        lateral_vel: 0.7 → 2.0  (× 2.9)
+_base: bdx_slim_v3.yaml
+
+reward:
+  fwd_vel: 5.0
+  yaw_rat: 5.0
+  lateral_vel: 2.0
