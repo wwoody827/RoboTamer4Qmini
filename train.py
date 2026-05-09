@@ -54,7 +54,11 @@ def train():
     all_model_dir = join(exp_dir, 'model', 'all')
     os.makedirs(all_model_dir, exist_ok=True)
     log_dir = join(exp_dir, 'log')
-    clear_dir(log_dir)
+    # Preserve TB history when resuming. Fresh runs wipe to avoid mixing
+    # multiple training attempts under the same exp dir.
+    if args.resume is None:
+        clear_dir(log_dir)
+    os.makedirs(log_dir, exist_ok=True)
     writer = SummaryWriter(log_dir, flush_secs=10)
     num_steps_per_env = cfg.runner.num_steps_per_env
     num_learning_iterations = cfg.runner.max_iterations
