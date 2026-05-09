@@ -62,6 +62,8 @@ def get_args():
          "help": "Resume training from a checkpoint"},
         {"name": "--init_only", "action": "store_true", "default": False,
          "help": "When --resume is set, load only actor weights (no critic, no optimizer, no LR, iter=1). For transfer learning where reward changes."},
+        {"name": "--resume_warmup_iters", "type": int, "default": 0,
+         "help": "When --resume is set, skip PPO updates for first N iters (just collect data) so envs desync from synchronized fresh-reset before training. ~30-50 covers one full episode."},
         {"name": "--render", "action": "store_true", "default": False, "help": "Force display off at all times"},
         {"name": "--fix_cam", "action": "store_true", "default": False, "help": "Force display off at all times"},
         {"name": "--cmp_real", "action": "store_true", "default": False,

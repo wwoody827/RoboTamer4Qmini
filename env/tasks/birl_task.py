@@ -227,6 +227,17 @@ class BIRLTask(NullTask):
         self.heading_ref    = torch.zeros(self.num_envs, 1, dtype=torch.float, device=self.device)
         self.last_ang_vel_z = torch.zeros(self.num_envs, 1, dtype=torch.float, device=self.device)
 
+        # Measurement low-pass for cmd-tracking rewards. When > 0, fwd/lateral/yaw
+        # tracking errors are computed against the LP-filtered measurement instead
+        # of the raw per-step value, so natural gait oscillation isn't penalized.
+        # 0.0 = no filter (use raw, backward compat). 0.9 ≈ 150ms time constant.
+        # CfgNode returns None for missing keys (not raise AttributeError), so
+        # getattr default never fires — explicit `or 0.0` covers both missing and
+        # explicit-None cases.
+        self._meas_lp_alpha = float(getattr(self.cfg.reward, 'cmd_track_lp_alpha', 0.0) or 0.0)
+        self._lp_lin_vel = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)  # [vx, vy]
+        self._lp_yaw_rate = torch.zeros(self.num_envs, 1, dtype=torch.float, device=self.device)
+
         self.last_foot_frc = torch.zeros(self.num_envs, self.num_legs, dtype=torch.float, device=self.device,
                                          requires_grad=False)
         self.foot_frc_acc = torch.zeros(self.num_envs, self.num_legs, dtype=torch.float, device=self.device,
@@ -472,6 +483,9 @@ class BIRLTask(NullTask):
         self.pm_f = self.phase_modulator.frequency.clone()
         self.heading_ref[env_ids]    = self.env.base_euler[env_ids, 2].unsqueeze(-1)
         self.last_ang_vel_z[env_ids] = self.env.base_ang_vel[env_ids, 2].unsqueeze(-1)
+        # Seed measurement LP filters with current values to avoid step-1 transient
+        self._lp_lin_vel[env_ids] = self.env.base_lin_vel[env_ids, :2]
+        self._lp_yaw_rate[env_ids] = self.env.base_ang_vel[env_ids, 2:3]
         self.joint_act_for_pd[env_ids] = self.current_joint_act[env_ids]
         if self._use_act_filter:
             _alpha_range = getattr(self.cfg.action, 'actuator_filter_alpha_range', [0.3, 0.7])
@@ -714,8 +728,18 @@ class BIRLTask(NullTask):
 
     def reward(self):
         constant_rew = to_torch([1.]).repeat(self.num_envs, 1)
-        lin_vel_x_norm = torch.clip(torch.norm(self.commands[:, [0, 1]], dim=1, keepdim=True), min=0.3, max=2.) + 0.2
-        yaw_rate_norm = torch.clip(torch.abs(self.commands[:, [2]]), min=0.3, max=1.5) + 0.2
+        # `lin_vel_x_norm` scales most regulatory rewards (balance, ang_vel,
+        # vertical_vel, foot_soft, jnt_vel, ...). Originally norm of [vx, vy]
+        # only — but pure_yaw (cmd_vx=cmd_vy=0, cmd_yaw≠0) hits the floor 0.3
+        # and over-regulates (max-strength penalty for any motion), making
+        # turning-in-place very hard to learn. Set `command.norm_includes_yaw`
+        # = true to also include cmd_yaw, so non-zero yaw cmds relax regulation.
+        if getattr(self.cfg.command, 'norm_includes_yaw', False):
+            lin_vel_x_norm = torch.clip(torch.norm(self.commands[:, :3], dim=1, keepdim=True), min=0.3, max=2.) + 0.2
+        else:
+            lin_vel_x_norm = torch.clip(torch.norm(self.commands[:, [0, 1]], dim=1, keepdim=True), min=0.3, max=2.) + 0.2
+        # (yaw_rate_norm previously used by Gaussian yaw reward; replaced by
+        # linear cmd-tracking in walk_v2+, no longer referenced.)
         base_heit_rew = torch.exp(-70 * (self.env.base_pos[:, [2]] - 0.45) ** 2)
 
         balance_rew = 0.5 * (base_heit_rew * torch.exp(-torch.clip(5. / lin_vel_x_norm, min=2, max=8.) * torch.norm(self.env.base_euler[:, :2], dim=-1, keepdim=True)) + 1.)
@@ -723,13 +747,46 @@ class BIRLTask(NullTask):
         # Linear cmd-tracking reward: r = 1 - clip(α·|err|, 0, 1.5).
         # Peaks at +1, bottoms at -0.5. Constant gradient → never dies in tail
         # (Gaussian was giving ~50% reward at err=0.4 → no learning pressure).
-        fwd_err     = torch.abs(self.commands[:, [0]] - self.env.base_lin_vel[:, [0]])
-        lateral_err = torch.abs(self.commands[:, [1]] - self.env.base_lin_vel[:, [1]])
-        yaw_err     = torch.abs(self.commands[:, [2]] - self.env.base_ang_vel[:, [2]])
+        #
+        # When _meas_lp_alpha > 0, error is computed against an EMA of the
+        # measurement (not raw per-step) so natural gait oscillation isn't
+        # penalized — policy is free to wobble per-step as long as the mean
+        # tracks the command. α=0.9 ≈ 150ms time constant at 67Hz.
+        if self._meas_lp_alpha > 0.0:
+            a = self._meas_lp_alpha
+            self._lp_lin_vel  = a * self._lp_lin_vel  + (1.0 - a) * self.env.base_lin_vel[:, :2]
+            self._lp_yaw_rate = a * self._lp_yaw_rate + (1.0 - a) * self.env.base_ang_vel[:, 2:3]
+            fwd_meas, lat_meas = self._lp_lin_vel[:, [0]], self._lp_lin_vel[:, [1]]
+            yaw_meas = self._lp_yaw_rate
+        else:
+            fwd_meas = self.env.base_lin_vel[:, [0]]
+            lat_meas = self.env.base_lin_vel[:, [1]]
+            yaw_meas = self.env.base_ang_vel[:, [2]]
 
-        forward_vel_rew = 1.0 - torch.clip(2.0 * fwd_err,     min=0., max=1.5)
-        lateral_vel_rew = 1.0 - torch.clip(3.0 * lateral_err, min=0., max=1.5)
-        yaw_rate_rew    = 1.0 - torch.clip(2.0 * yaw_err,     min=0., max=1.5)
+        fwd_err     = torch.abs(self.commands[:, [0]] - fwd_meas)
+        lateral_err = torch.abs(self.commands[:, [1]] - lat_meas)
+        yaw_err     = torch.abs(self.commands[:, [2]] - yaw_meas)
+
+        # Deadzone: per-step gait oscillation imposes a noise floor (~0.1 m/s
+        # for vx, ~0.1 rad/s for yaw). Subtract deadzone from |err| so the
+        # policy isn't penalized for tracking within the noise floor — but
+        # unlike LP filtering it can't game by alternating large oscillations.
+        fwd_dz = float(getattr(self.cfg.reward, 'fwd_err_deadzone', 0.0) or 0.0)
+        lat_dz = float(getattr(self.cfg.reward, 'lateral_err_deadzone', 0.0) or 0.0)
+        yaw_dz = float(getattr(self.cfg.reward, 'yaw_err_deadzone', 0.0) or 0.0)
+        if fwd_dz > 0.0: fwd_err     = torch.clamp(fwd_err     - fwd_dz, min=0.)
+        if lat_dz > 0.0: lateral_err = torch.clamp(lateral_err - lat_dz, min=0.)
+        if yaw_dz > 0.0: yaw_err     = torch.clamp(yaw_err     - yaw_dz, min=0.)
+
+        # Per-component error slope: r = 1 - clip(slope·|err|, 0, 1.5).
+        # Larger slope = steeper penalty = more pressure to track tightly.
+        # Default values match the original Gaussian-replacement defaults.
+        fwd_slope = float(getattr(self.cfg.reward, 'fwd_err_slope', 2.0) or 2.0)
+        lat_slope = float(getattr(self.cfg.reward, 'lateral_err_slope', 3.0) or 3.0)
+        yaw_slope = float(getattr(self.cfg.reward, 'yaw_err_slope', 2.0) or 2.0)
+        forward_vel_rew = 1.0 - torch.clip(fwd_slope * fwd_err,     min=0., max=1.5)
+        lateral_vel_rew = 1.0 - torch.clip(lat_slope * lateral_err, min=0., max=1.5)
+        yaw_rate_rew    = 1.0 - torch.clip(yaw_slope * yaw_err,     min=0., max=1.5)
 
         ang_vel_rew = torch.exp(
             -torch.clip(2. / lin_vel_x_norm, min=0.7, max=6.) * torch.norm(self.env.base_ang_vel[:, :2], dim=1,
@@ -774,6 +831,11 @@ class BIRLTask(NullTask):
             dim=1, keepdim=True)).clip(min=-0., max=1.) * self.static_flag
 
         vy_walking = (torch.abs(self.commands[:, [1]]) > 0.1).float()
+        # yaw_walking: turning command active. Used below (with vy_walking) to
+        # gate hip_yaw/hip_roll-specific penalties — those legitimately need
+        # large hip motion when turning OR strafing, so penalize ONLY when
+        # neither is requested (i.e., pure forward / standstill).
+        yaw_walking = (torch.abs(self.commands[:, [2]]) > 0.1).float()
         foot_slip_rew += -0.5 * torch.norm(torch.norm(self.env.foot_vel.view(self.num_envs, self.num_legs, -1)[:, :, [1]], dim=-1), dim=1,
                                            keepdim=True) * self.static_flag * (1. - vy_walking)
 
@@ -802,7 +864,10 @@ class BIRLTask(NullTask):
             (self.net_out_history[-3] - 2 * self.net_out_history[-2] + self.net_out_history[-1])[:, _jo:], dim=1, keepdim=True) ** 2
 
         action_constraint_rew = -0.1 * torch.clip(1. / lin_vel_x_norm, 0, 1.) * torch.norm((self.current_joint_act - self.ref_joint_action), dim=1, keepdim=True)
-        action_constraint_rew += -3. * torch.norm(((self.current_joint_act - self.ref_joint_action)[:, [0, 1, 5, 6]]), dim=1, keepdim=True) * self.static_flag * (1. - vy_walking)
+        # hip_yaw/hip_roll deviation penalty — only when NEITHER strafing
+        # nor turning. Otherwise turning policy needs hip_yaw motion, was
+        # being penalized for it.
+        action_constraint_rew += -3. * torch.norm(((self.current_joint_act - self.ref_joint_action)[:, [0, 1, 5, 6]]), dim=1, keepdim=True) * self.static_flag * (1. - vy_walking) * (1. - yaw_walking)
 
         sa_constraint_rew = -0.1 * torch.clip(1. / lin_vel_x_norm, min=0., max=1.) * torch.norm(self.current_joint_act - self.ref_joint_action, dim=1,keepdim=True) ** 2 * self.static_flag
 
@@ -816,7 +881,9 @@ class BIRLTask(NullTask):
         joint_pos_error_rew = - 0.4 * torch.clip(1. / lin_vel_x_norm, min=0., max=1.) * torch.norm((self.current_joint_act - self.env.joint_pos), dim=1,keepdim=True) ** 2
 
         joint_velocity_rew = -0.4 * torch.clip(1. / lin_vel_x_norm, min=0., max=1.) * torch.norm(self.env.joint_vel[:, :], dim=1,keepdim=True) ** 2
-        joint_velocity_rew += -torch.clip(1. / lin_vel_x_norm, 0, 1) * torch.norm(self.env.joint_vel[:, [0, 1, 5, 6]], dim=1,keepdim=True) ** 2 * (1. - vy_walking)
+        # hip_yaw/hip_roll velocity penalty — same gating as act_const.
+        # Yaw and strafe both legitimately need fast hip motion.
+        joint_velocity_rew += -torch.clip(1. / lin_vel_x_norm, 0, 1) * torch.norm(self.env.joint_vel[:, [0, 1, 5, 6]], dim=1,keepdim=True) ** 2 * (1. - vy_walking) * (1. - yaw_walking)
 
         joint_tor_rew = -0.4 * torch.clip(1. / lin_vel_x_norm, min=0., max=2.) * torch.sum(
             (torch.abs(self.env.react_tau[:, :]) - self.env.torque_limits[:]).clip(min=0.), dim=1, keepdim=True)
@@ -949,8 +1016,15 @@ class BIRLTask(NullTask):
             self.debug = None
         if self.rew_names is None:
             self.rew_names = list(rew_dict.keys())
+        # Per-component reward clip — bounds each weighted reward term per step.
+        # Default [-4, +5] historically capped yaw_rat (weight 8 × max +1 = +8 →
+        # clipped to +5, losing 38% of perfect-tracking incentive) and foot_phase
+        # (weight 8 × min -1 = -8 → clipped to -4, hiding "fully out of phase" cost).
+        # Widen via config for runs where reward weights exceed 4-5 in magnitude.
+        _rc_min = float(getattr(self.cfg.reward, 'component_clip_min', -4.0) or -4.0)
+        _rc_max = float(getattr(self.cfg.reward, 'component_clip_max', 5.0) or 5.0)
         rewards = torch.cat(
-            [torch.clip(value.to(self.device), min=-4., max=5.) * self.env.dt for value in rew_dict.values()], dim=1)
+            [torch.clip(value.to(self.device), min=_rc_min, max=_rc_max) * self.env.dt for value in rew_dict.values()], dim=1)
         self._last_rew_components = rewards.detach()
         eval_rew = torch.cat([rew_dict[key] * self.env.dt for key in
                               ['fwd_vel', 'yaw_rat', 'ang_vel', 'lateral_vel', 'vertical_vel', 'twist']],

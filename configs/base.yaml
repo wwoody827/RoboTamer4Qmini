@@ -166,6 +166,11 @@ command:
   lin_vel_y_range: [-0.3, 0.3]
   ang_vel_yaw_range: [-1, 1]
   heading_range: [0., 3.141592653589793]
+  # When true, lin_vel_x_norm (used by most regulatory rewards) includes
+  # cmd_yaw — so pure_yaw cmds don't hit the static-velocity-norm floor
+  # that over-regulates turning-in-place. Recommended for any setup that
+  # uses regime sampling with pure_yaw mode.
+  norm_includes_yaw: false
 
 terrain:
   mesh_type: trimesh
@@ -236,6 +241,34 @@ asset:
 # Set to 0 to disable a term. Override in child configs.
 reward:
   constant: 0.3
+  # EMA filter on measured velocities for cmd-tracking rewards. 0 = raw
+  # per-step error (default). 0.9 ≈ 150ms window at 67Hz, removes natural
+  # gait oscillation from the error signal without constraining the policy.
+  # WARNING: aggressive α (≥0.7) is exploitable — policy learns big
+  # oscillations whose mean tracks cmd but eval (raw measurement) shows
+  # huge per-step error. Prefer deadzone below.
+  cmd_track_lp_alpha: 0.0
+  # Deadzone on cmd-tracking error: |err| < deadzone gets perfect reward,
+  # |err| > deadzone is linearly penalized starting from 0. Subtracts the
+  # natural gait noise floor without being gameable. Per-component because
+  # natural noise differs (vx ~0.1 m/s, yaw ~0.1 rad/s).
+  fwd_err_deadzone: 0.0
+  lateral_err_deadzone: 0.0
+  yaw_err_deadzone: 0.0
+  # Per-component error slope: r = 1 - clip(slope·|err|, 0, 1.5). Larger
+  # slope = steeper penalty. Defaults match the original linear-reward
+  # values. Useful for pushing harder on a stuck dim (e.g., yaw_err_slope=4
+  # makes yaw err=0.4 cost 1.6 per step instead of 0.8).
+  fwd_err_slope: 2.0
+  lateral_err_slope: 3.0
+  yaw_err_slope: 2.0
+  # Per-component reward clip applied AFTER weight, BEFORE summing rewards.
+  # Default [-4, +5] historically. With weight 8 (yaw_rat / foot_phase),
+  # this clips perfect tracking from +8 to +5 (-37%) and full mismatch
+  # from -8 to -4 (-50%) — both flatten the reward landscape, weakening
+  # learning signal for those terms. Widen for high-weight runs.
+  component_clip_min: -4.0
+  component_clip_max: 5.0
   base_heit: 1.0
   balance: 1.5
   fwd_vel: 2.3

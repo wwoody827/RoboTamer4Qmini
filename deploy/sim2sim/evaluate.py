@@ -288,17 +288,22 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
             break
 
         if step % decimation == 0:
-            vx_errors.append(abs(data.qvel[0] - cmd_vx))
-            yaw_errors.append(abs(data.qvel[5] - cmd_yaw))
-            vy_abs.append(abs(data.qvel[1]))
             quat  = data.xquat[imu_body_id] if imu_body_id >= 0 else data.qpos[3:7]
             euler = quat_to_euler_xyz(quat)
             roll_rms_acc.append(euler[0] ** 2)
             pitch_rms_acc.append(euler[1] ** 2)
             torque_acc.append(np.sum(np.abs(torques * dq)))
-            # body-frame forward velocity (robust to yaw): project world (vx, vy) onto heading
+            # Body-frame velocities — matches training reward (which uses
+            # quat_rotate_inverse(base_quat, base_lvel)). World-frame qvel[0]
+            # would diverge from cmd_vx when robot yaw drifts during episode.
             yaw_world = euler[2]
-            vx_body = data.qvel[0] * math.cos(yaw_world) + data.qvel[1] * math.sin(yaw_world)
+            cy, sy = math.cos(yaw_world), math.sin(yaw_world)
+            vx_body =  data.qvel[0] * cy + data.qvel[1] * sy
+            vy_body = -data.qvel[0] * sy + data.qvel[1] * cy
+            # vx_errors / yaw_errors / vy_abs now in body frame
+            vx_errors.append(abs(vx_body - cmd_vx))
+            yaw_errors.append(abs(data.qvel[5] - cmd_yaw))   # qvel[5] = world yaw rate ≈ body yaw rate when roll/pitch small (flat walking)
+            vy_abs.append(abs(vy_body))
             t_now   = step * sim_dt
             vx_body_samples.append((t_now, vx_body))
             base_z_samples.append((t_now, float(data.qpos[2])))

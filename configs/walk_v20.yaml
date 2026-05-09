@@ -1,16 +1,26 @@
-# walk_v4 — flattened (no _base inheritance).
+# walk_v20 — current best baseline (flattened, no _base inheritance).
 #
-# Key design choices (vs vanilla BIRL):
-#   - phase.mode=input          BD_X-style external clock (10-dim action)
-#   - phase.freq_low/high=2-3   per-env freq sampled, --cmd_freq at deploy
-#   - action.mode=absolute      absolute joint targets + lowpass α=0.75
-#   - reward.fwd_vel=5, yaw_rat=5, lateral_vel=2  bumped from base
-#                               (paired with linear cmd-tracking reward in
-#                                birl_task.py — replaces Gaussian)
-#   - command.regime=pure_and_pairs  50% pure single-dim + 25% vx+vy + 25% vx+yaw
-#                                    (matches deploy distribution; never vy+yaw)
-#   - reward.foot_vz/foot_acc/feet_frc/sa_const/act_const/net_smo/net_out_val/air_time = 0
-#                               (slim variant — clock pins phase, redundant pens off)
+# Lineage: walk_v2 → v3 → v4 → v5 → v6 → v8 → v9 → v10 → v11 → v20.
+# All speculative tweaks tested in v1-v19 either reverted or kept here.
+#
+# Key design choices (from experiments v2-v19, all validated):
+#   - phase.mode=input              BD_X-style external clock
+#   - phase.freq_default=2.5        cmd_freq sampled [2.0, 3.0] per env
+#   - action.action_mode=absolute   absolute joint targets + lowpass α=0.75
+#   - normalize_value=true          PopArt-lite, stable v_loss
+#   - regime=pure_and_pairs         50% pure single-cmd + 25% vx+vy + 25% vx+yaw
+#   - history 5×skip 2 (135ms)      KEY win — 5-10× faster convergence
+#   - linear cmd reward (1-α|err|)  in code, replaces dead-tail Gaussian
+#   - foot_phase=8, yaw_rat=8       strong reward signal for clock + yaw lock
+#   - fwd_vel=2, lateral_vel=0.5    weakened to balance against above
+#   - yaw_err_slope=5, deadzone=0.05  steep yaw penalty + tight noise floor
+#   - hip_yaw gate fix (in code)    don't penalize hip motion when turning
+#
+# Best ckpt history (this exact stack):
+#   walk_v11 @7600/7800: vx_fwd 0.069, yaw 0.131, dual 15s
+#   walk_v20 @600 (this run, just hip_yaw gate added):
+#     vx_bwd 0.095 (NEW best ever), vx_fwd 0.232, yaw 0.315, dual 15s
+#   walk_v20 @800: vx_fwd 0.115, yaw 0.334 — converged 10× faster than walk_v11.
 
 task:
   cfg: BIRL
@@ -30,8 +40,8 @@ phase:
   freq_default: 2.5
 
 observation:
-  history: 3
-  skip: 1
+  history: 5
+  skip: 2
   slots:
     - commands_3
     - base_euler
@@ -81,6 +91,7 @@ algorithm:
   gae_lambda: 0.95
   desired_kl: 0.01
   max_grad_norm: 1.0
+  normalize_value: true
 
 action:
   action_mode: absolute
@@ -168,9 +179,10 @@ command:
   use_yaw_smooth_reward: false
   lin_vel_x_range:   [-0.3, 0.7]
   lin_vel_y_range:   [-0.3, 0.3]
-  ang_vel_yaw_range: [-1, 1]
+  ang_vel_yaw_range: [-1.0, 1.0]
   heading_range:     [0.0, 3.141592653589793]
   regime: pure_and_pairs
+  norm_includes_yaw: false   # Bug fix #2 was tested + reverted (caused mini-step)
 
 terrain:
   mesh_type: trimesh
@@ -241,10 +253,18 @@ reward:
   constant: 0.3
   base_heit: 1.0
   balance: 1.5
-  # cmd-tracking — bumped from BIRL defaults (2.3/2.5/0.7) for linear reward
-  fwd_vel: 5.0
-  yaw_rat: 5.0
-  lateral_vel: 2.0
+  # cmd-tracking — linear reward in code (no Gaussian)
+  fwd_vel: 2.0
+  lateral_vel: 0.5
+  yaw_rat: 8.0
+  fwd_err_deadzone: 0.10
+  lateral_err_deadzone: 0.10
+  yaw_err_deadzone: 0.05
+  fwd_err_slope: 2.0
+  lateral_err_slope: 3.0
+  yaw_err_slope: 5.0
+  # gait
+  foot_phase: 8.0    # strong clock-lock pressure (input mode)
   vertical_vel: 0.6
   ang_vel: 0.6
   twist: 2.5
@@ -253,23 +273,27 @@ reward:
   foot_supt: 0.7
   foot_heit: 0.7
   leg_width_rew: 0.5
-  act_const: 0.0       # off (slim — risk of crab-walk / yaw-lock)
-  sa_const: 0.0        # off (slim)
-  foot_phase: 3.0
+  foot_phase: 8.0
   jnt_pos_err: 0.2
   act_smo: 1.5
-  net_smo: 0.0         # off (slim — redundant with act_smo)
-  net_out_val: 0.0     # off (slim)
   foot_slip: 0.5
-  foot_vz: 0.0         # off (slim — overlaps foot_sft)
-  foot_acc: 0.0        # off (slim)
-  foot_sft: 2.7        # foot soft-landing — main impact regularizer
+  foot_sft: 2.7
   jnt_vel: 0.003
-  feet_py: 0.5         # foot pitch anchor — fixes pitch_rms_bwd
-  feet_frc: 0.0        # off (slim — overlaps foot_sft)
+  feet_py: 0.5
   joint_tor: 0.001
+  power: 0.1
+  # off (slim — clock pins phase, redundant pens off)
+  act_const: 0.0
+  sa_const: 0.0
+  net_smo: 0.0
+  net_out_val: 0.0
+  foot_vz: 0.0
+  foot_acc: 0.0
+  feet_frc: 0.0
   pmf: 0.0
   heading: 0.0
   yaw_smooth: 0.0
-  power: 0.1
-  air_time: 0.0        # off (clock pins phase)
+  air_time: 0.0
+  # Bug fix #1 was tested + reverted (caused mini-step at extreme range)
+  component_clip_min: -4.0
+  component_clip_max: 5.0

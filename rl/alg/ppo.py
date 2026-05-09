@@ -103,7 +103,7 @@ class PPO:
 
     def update(self, mirror=None, mirror_weight=0.5):
         """
-        mirror: optional BIRLMirror instance. When provided, each mini-batch is
+        mirror: optional Mirror instance. When provided, each mini-batch is
         augmented with its L↔R mirrored counterpart to enforce policy symmetry.
         Only the actor surrogate loss is computed for mirrored data (no value loss).
         """

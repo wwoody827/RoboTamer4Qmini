@@ -70,17 +70,6 @@ class TestPPOUpdate:
 
     def test_mirror_augmentation_no_nan(self, tiny_ppo):
         """Update with mock mirror should not produce NaN."""
-        from utils.mirror import BIRLMirror
-
-        # BIRLMirror expects 132-dim obs and 12-dim actions.
-        # Create a PPO with matching dims.
-        actor = Actor(input_dim=132, output_dim=12, hidden_layers=(32,), activation='relu')
-        critic = Critic(input_dim=132, hidden_layers=(32,), activation='relu')
-        alg = PPO(actor, critic, num_learning_epochs=2, num_mini_batches=2,
-                  learning_rate=1e-3, device='cpu')
-        alg.init_storage(4, 8, [132], [132], [12])
-
-        mirror = BIRLMirror(obs_history=3, device='cpu')
 
         for _ in range(8):
             obs = torch.randn(4, 132)

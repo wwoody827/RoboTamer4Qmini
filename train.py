@@ -12,7 +12,7 @@ from collections import deque
 import collections
 import statistics
 from utils.common import clear_dir
-from utils.mirror import BIRLMirror, BDXMirror, Mirror
+from utils.mirror import Mirror
 from config.loader import load_config, CfgNode, config_to_dict, save_config
 from deploy.manifest import build_manifest, save_manifest
 from isaacgym.torch_utils import *
@@ -206,7 +206,18 @@ def train():
         stop = time.time()
         collection_time = stop - start
         start = stop
-        mean_value_loss, mean_surrogate_loss, mean_kl = alg.update(mirror=_mirror, mirror_weight=_mirror_weight)
+        # Resume warmup: skip PPO updates for first N iters after resume so
+        # synchronized fresh-reset envs can desync before learning. Without
+        # this, all 4096 envs start at step 0 → biased gradient toward early-
+        # episode behavior → actor drifts away from steady-state walking.
+        _resume_warmup = getattr(args, 'resume_warmup_iters', 0) or 0
+        _in_warmup = (args.resume is not None and not args.init_only
+                      and it < current_learning_iteration + _resume_warmup)
+        if _in_warmup:
+            mean_value_loss, mean_surrogate_loss, mean_kl = 0.0, 0.0, 0.0
+            alg.storage.clear()
+        else:
+            mean_value_loss, mean_surrogate_loss, mean_kl = alg.update(mirror=_mirror, mirror_weight=_mirror_weight)
         saved_model_state_dict = {
             'actor': alg.actor.state_dict(),
             'critic': alg.critic.state_dict(),
