@@ -709,7 +709,11 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, cmd_freq=None, duration=Non
 
     # Reference recording state (populated if record_path is set)
     _rec = {"joint_pos": [], "joint_vel": [], "base_pos": [],
-            "base_quat": [], "base_lin_vel": [], "base_ang_vel": []}
+            "base_quat": [], "base_lin_vel": [], "base_ang_vel": [],
+            # Extended fields for BC / SFT / distillation
+            "cmd": [], "obs": [], "action_raw": [], "action_scaled": [],
+            "joint_target": [], "torque": [], "static_flag": [],
+            "phase_clock": [], "cmd_freq_step": []}
     _rec_skip_steps = record_skip  # skip first N policy steps to let robot settle
 
     print(f"\nRunning sim2sim: cmd_vx={cmd_vx:.2f} m/s, cmd_vy={cmd_vy:.2f} m/s, cmd_yaw={cmd_yaw:.2f} rad/s")
@@ -777,12 +781,29 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, cmd_freq=None, duration=Non
                 if _rec_skip_steps > 0:
                     _rec_skip_steps -= 1
                 else:
-                    _rec["joint_pos"].append(data.qpos[QPOS_START:QPOS_START + NUM_JOINTS].copy())
-                    _rec["joint_vel"].append(data.qvel[QVEL_START:QVEL_START + NUM_JOINTS].copy())
+                    q_now  = data.qpos[QPOS_START:QPOS_START + NUM_JOINTS]
+                    dq_now = data.qvel[QVEL_START:QVEL_START + NUM_JOINTS]
+                    tau_snap = compute_torques(current_joint_act, q_now, dq_now)
+                    _rec["joint_pos"].append(q_now.copy())
+                    _rec["joint_vel"].append(dq_now.copy())
                     _rec["base_pos"].append(data.qpos[0:3].copy())
                     _rec["base_quat"].append(data.xquat[imu_body_id].copy())       # [w,x,y,z]
                     _rec["base_lin_vel"].append(data.qvel[0:3].copy())              # world frame
                     _rec["base_ang_vel"].append(data.cvel[imu_body_id][0:3].copy()) # body frame ang vel
+                    # Extended fields
+                    _rec["cmd"].append(commands.copy())
+                    _rec["obs"].append(obs_now.copy())                              # single frame, not stacked
+                    _rec["action_raw"].append(net_out.copy())                       # net_out, ∈ [-1, 1]
+                    _rec["action_scaled"].append(scaled.copy())                     # scaled to phys units
+                    _rec["joint_target"].append(current_joint_act.copy())           # PD target sent to mujoco
+                    _rec["torque"].append(tau_snap.copy())                          # snapshot torque
+                    _rec["static_flag"].append(np.float32(static_flag))
+                    if is_bdx:
+                        _rec["phase_clock"].append(ext_clock.sin_cos().copy())      # [sinL, sinR, cosL, cosR]
+                        _rec["cmd_freq_step"].append(np.float32(cmd_freq))
+                    else:
+                        _rec["phase_clock"].append(np.zeros(4, dtype=np.float32))
+                        _rec["cmd_freq_step"].append(np.float32(0.0))
 
         q  = data.qpos[QPOS_START:QPOS_START + NUM_JOINTS]
         dq = data.qvel[QVEL_START:QVEL_START + NUM_JOINTS]
@@ -863,30 +884,127 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, cmd_freq=None, duration=Non
 
     # Save reference clip if requested
     if record_path is not None and len(_rec["joint_pos"]) > 0:
-        _save_reference_clip(_rec, record_path, policy_dt, record_skill, record_loop)
+        ep_meta = {
+            'cmd_const':  np.array([cmd_vx, cmd_vy, cmd_yaw], dtype=np.float32),
+            'cmd_freq':   np.float32(cmd_freq if is_bdx else 0.0),
+            'policy_path': cfg.get('policy_path', ''),
+        }
+        cfg_meta = {
+            'phase_mode':   phase_mode,
+            'action_mode':  action_mode,
+            'action_dim':   int(len(act_low)),
+            'obs_dim':      int(obs_dim),
+            'obs_history':  int(obs_hist),
+            'obs_skip':     int(obs_skip),
+            'lp_alpha':     float(lp_alpha),
+            'num_legs':     int(num_legs),
+            'static_thr':   float(static_thr),
+            'policy_dt':    float(policy_dt),
+        }
+        _save_reference_clip(_rec, record_path, policy_dt, record_skill, record_loop,
+                             ep_meta=ep_meta, cfg_meta=cfg_meta)
 
 
-def _save_reference_clip(rec, path, dt, skill, loop):
-    """Save recorded frames as a reference clip .npz (MIRL format)."""
+def _save_reference_clip(rec, path, dt, skill, loop, ep_meta=None, cfg_meta=None):
+    """Save recorded frames as a reference clip .npz.
+
+    Backward-compatible MIRL format (joint_pos, joint_vel, base_*, dt, skill, loop)
+    plus extended fields for BC/SFT/distillation when present (cmd, obs, action_raw,
+    action_scaled, joint_target, torque, static_flag, phase_clock, cmd_freq_step)
+    plus episode + config metadata.
+    """
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    arrays = {k: np.array(v, dtype=np.float32) for k, v in rec.items()}
-    T = len(arrays["joint_pos"])
-    np.savez(
-        path,
-        joint_pos    = arrays["joint_pos"],    # [T, 10]
-        joint_vel    = arrays["joint_vel"],    # [T, 10]
-        base_pos     = arrays["base_pos"],     # [T, 3]
-        base_quat    = arrays["base_quat"],    # [T, 4]  [w,x,y,z]
-        base_lin_vel = arrays["base_lin_vel"], # [T, 3]
-        base_ang_vel = arrays["base_ang_vel"], # [T, 3]
-        dt           = np.float32(dt),
-        source       = np.bytes_("rollout"),
-        skill        = np.bytes_(skill),
-        loop         = np.bool_(loop),
-    )
+    arrays = {k: np.array(v, dtype=np.float32) for k, v in rec.items() if len(v) > 0}
+    T_full = len(arrays["joint_pos"])
+
+    # Truncate at fall (base z < 0.20 m) — drop garbage frames after termination
+    base_z = arrays["base_pos"][:, 2]
+    fell_mask = base_z < 0.20
+    if fell_mask.any():
+        T = int(np.argmax(fell_mask))
+        terminated = 'fell'
+    else:
+        T = T_full
+        terminated = 'completed'
+    if T > 0 and T < T_full:
+        arrays = {k: v[:T] for k, v in arrays.items()}
+
+    if T == 0:
+        print(f"\n[record] All frames flagged fell at start; skipping save: {path}")
+        return
+
+    # Episode-level metrics computed from truncated trace (in world frame; body-frame
+    # cmd matching is left for downstream filtering with manifest cmd + base_quat)
+    base_pos     = arrays["base_pos"]
+    base_lin_vel = arrays["base_lin_vel"]
+    base_quat    = arrays["base_quat"]
+    base_ang_vel = arrays["base_ang_vel"]
+    # Body-frame velocity (project world vel through quat)
+    qw, qx, qy, qz = base_quat[:, 0], base_quat[:, 1], base_quat[:, 2], base_quat[:, 3]
+    yaw_world = np.arctan2(2*(qw*qz + qx*qy), 1 - 2*(qy*qy + qz*qz))
+    cy, sy = np.cos(yaw_world), np.sin(yaw_world)
+    vx_body = base_lin_vel[:, 0] * cy + base_lin_vel[:, 1] * sy
+    vy_body = -base_lin_vel[:, 0] * sy + base_lin_vel[:, 1] * cy
+    yaw_rate_body = base_ang_vel[:, 2]
+
+    cmd_const = ep_meta.get('cmd_const') if ep_meta else np.zeros(3, dtype=np.float32)
+    metrics = {
+        'mean_vx_err':     float(np.mean(np.abs(vx_body - cmd_const[0]))),
+        'mean_vy_err':     float(np.mean(np.abs(vy_body - cmd_const[1]))),
+        'mean_yaw_err':    float(np.mean(np.abs(yaw_rate_body - cmd_const[2]))),
+        'mean_height':     float(np.mean(base_pos[:, 2])),
+        'min_height':      float(np.min(base_pos[:, 2])),
+        'max_tilt_deg':    float(np.degrees(np.max(np.arccos(np.clip(1 - 2*(qx*qx + qy*qy), -1, 1))))),
+        'survival_time':   float(T * dt),
+        'survival_full':   float(T_full * dt),
+        'terminated':      terminated,
+    }
+
+    save_kw = {
+        # Legacy (backward compat)
+        'joint_pos':    arrays['joint_pos'],
+        'joint_vel':    arrays['joint_vel'],
+        'base_pos':     arrays['base_pos'],
+        'base_quat':    arrays['base_quat'],
+        'base_lin_vel': arrays['base_lin_vel'],
+        'base_ang_vel': arrays['base_ang_vel'],
+        'dt':           np.float32(dt),
+        'source':       np.bytes_('rollout'),
+        'skill':        np.bytes_(skill),
+        'loop':         np.bool_(loop),
+    }
+    # Extended fields (only if recorded)
+    for k in ('cmd', 'obs', 'action_raw', 'action_scaled',
+              'joint_target', 'torque', 'static_flag',
+              'phase_clock', 'cmd_freq_step'):
+        if k in arrays:
+            save_kw[k] = arrays[k]
+    # Metadata as 0-d arrays / bytes
+    if ep_meta:
+        save_kw['cmd_const']    = ep_meta['cmd_const']
+        save_kw['cmd_freq']     = ep_meta['cmd_freq']
+        save_kw['policy_path']  = np.bytes_(ep_meta.get('policy_path', ''))
+    if cfg_meta:
+        for k, v in cfg_meta.items():
+            if isinstance(v, str):
+                save_kw[f'meta_{k}'] = np.bytes_(v)
+            else:
+                save_kw[f'meta_{k}'] = np.float32(v) if isinstance(v, float) else np.int32(v)
+    for k, v in metrics.items():
+        if isinstance(v, str):
+            save_kw[f'metric_{k}'] = np.bytes_(v)
+        else:
+            save_kw[f'metric_{k}'] = np.float32(v)
+
+    np.savez(path, **save_kw)
     duration = T * dt
     print(f"\nReference clip saved: {path}")
-    print(f"  {T} frames  |  {duration:.1f}s  |  {1/dt:.0f}Hz  |  skill={skill}  loop={loop}")
+    print(f"  {T} frames  |  {duration:.1f}s  |  {1/dt:.0f}Hz  |  skill={skill}  loop={loop}  terminated={terminated}")
+    if ep_meta:
+        c = ep_meta['cmd_const']
+        print(f"  cmd=[{c[0]:+.2f},{c[1]:+.2f},{c[2]:+.2f}]  "
+              f"vx_err={metrics['mean_vx_err']:.3f}  vy_err={metrics['mean_vy_err']:.3f}  "
+              f"yaw_err={metrics['mean_yaw_err']:.3f}  tilt={metrics['max_tilt_deg']:.1f}°")
 
 
 # ---------------------------------------------------------------------------

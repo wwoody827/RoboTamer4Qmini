@@ -1,0 +1,28 @@
+created: '2026-05-09T10:36:29'
+input: data/traces/walk_v27_multi
+git_commit: bb4528d180e992acd12d432b60bf4b6baa2d412e
+git_dirty: true
+args:
+  include: clean
+  relabel: cmd_axes
+  drift_thresh_vx: 0.05
+  drift_thresh_vy: 0.2
+  drift_thresh_yaw: 0.2
+  cmd_active_thresh: 0.05
+  deadzone: 0.02
+counts:
+  clean: 144
+  drift: 11
+  failure: 0
+  kept: 144
+  invalid: 0
+total_frames: 112320
+meta:
+  phase_mode: input
+  action_mode: absolute
+  action_dim: 10
+  obs_dim: 43
+  obs_history: 5
+  obs_skip: 2
+  lp_alpha: 0.75
+  num_legs: 2

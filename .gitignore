@@ -22,3 +22,23 @@ MUJOCO_LOG.TXT
 # Recovery viz output
 recovery_*_videos/
 *.mp4
+
+# Sim2sim trace dumps (regenerable from ckpt + scripts/collect_traces.py)
+# .npz blobs are gitignored, but dataset.yaml + manifest.csv are kept as the
+# reproducibility recipe (policy sha256, git commit, sweep args).
+data/traces/**
+!data/traces/
+!data/traces/*/
+!data/traces/*/*/
+!data/traces/*/dataset.yaml
+!data/traces/*/manifest.csv
+!data/traces/*/*/dataset.yaml
+!data/traces/*/*/manifest.csv
+
+# BC/SFT datasets built from traces (regenerable via scripts/build_bc_dataset.py).
+# Keep dataset.yaml + episodes.csv recipe; train.npz is regenerable.
+data/datasets/**
+!data/datasets/
+!data/datasets/*/
+!data/datasets/*/dataset.yaml
+!data/datasets/*/episodes.csv
