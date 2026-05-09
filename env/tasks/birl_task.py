@@ -213,6 +213,14 @@ class BIRLTask(NullTask):
 
         # --- Air time tracking (always initialized; reward weight gates usage) ---
         self.foot_air_time = torch.zeros(self.num_envs, self.num_legs, dtype=torch.float, device=self.device)
+        # Snapshot of swing duration at touchdown event for cmd_freq-aware
+        # air_time reward (legged_gym style). _held_air_delta holds the most
+        # recent (swing_dur - target) value per leg, refreshed at each
+        # touchdown event — gives continuous per-step reward (vs sparse
+        # spike-only which averaged to ~0 in TB and had no learning effect).
+        self._td_swing_duration = torch.zeros(self.num_envs, self.num_legs, dtype=torch.float, device=self.device)
+        self._td_event = torch.zeros(self.num_envs, self.num_legs, dtype=torch.bool, device=self.device)
+        self._held_air_delta = torch.zeros(self.num_envs, self.num_legs, dtype=torch.float, device=self.device)
 
         # --- Reference clip state (populated by _load_ref_clips if paths provided) ---
         self._has_ref = False
@@ -493,6 +501,9 @@ class BIRLTask(NullTask):
 
         # Air time reset
         self.foot_air_time[env_ids] = 0.0
+        self._held_air_delta[env_ids] = 0.0
+        self._td_event[env_ids] = False
+        self._td_swing_duration[env_ids] = 0.0
 
         # RSI: assign new clip and randomise start frame for reset envs
         if self._has_ref:
@@ -557,6 +568,11 @@ class BIRLTask(NullTask):
 
         # Air time accumulation: reset to 0 on ground contact, else += dt.
         actual_in_air = (self.env.foot_frc < 1.0)
+        # Detect touchdown event (was in air last step, on ground now).
+        # Snapshot swing duration BEFORE the reset for cmd_freq-aware reward.
+        was_in_air = (self.foot_air_time > 0)
+        self._td_event = was_in_air & ~actual_in_air
+        self._td_swing_duration = torch.where(self._td_event, self.foot_air_time, torch.zeros_like(self.foot_air_time))
         self.foot_air_time = (self.foot_air_time + self.env.dt) * actual_in_air.float()
 
         # Advance reference frame
@@ -928,13 +944,22 @@ class BIRLTask(NullTask):
         else:
             foot_phase_rew = torch.zeros(self.num_envs, 1, device=self.device)
 
-        # Air time reward: continuous signal proportional to current airborne
-        # time per foot, saturated at 0.3s to prevent endless hovering.
-        actual_in_air = (self.env.foot_frc < 1.0)
-        air_time_rew = torch.sum(
-            self.foot_air_time.clip(max=0.3) * actual_in_air.float(),
-            dim=1, keepdim=True
-        ) * self.static_flag
+        # Air time reward (cmd_freq-aware, held-value):
+        # At each touchdown event, snapshot delta = (swing_dur - target_swing)
+        # into _held_air_delta. Hold this value between touchdowns so it
+        # contributes to per-step reward continuously (not just sparse spike).
+        # target_swing = (1 - support_ratio) / cmd_freq, per env.
+        # Mini-step has swing < target → delta < 0 → continuous penalty until
+        # next swing is long enough.
+        if self._phase_mode == 'input' and self._cmd_freq is not None:
+            support_ratio = float(getattr(self.cfg.phase, 'support_ratio', 0.6) or 0.6)
+            target_swing = (1.0 - support_ratio) / self._cmd_freq        # [n_envs, 1]
+            new_delta = (self._td_swing_duration - target_swing).clip(min=-0.5, max=0.5)
+            # Update held value at each touchdown event
+            self._held_air_delta = torch.where(self._td_event, new_delta, self._held_air_delta)
+            air_time_rew = self._held_air_delta.mean(dim=1, keepdim=True) * self.static_flag
+        else:
+            air_time_rew = torch.zeros(self.num_envs, 1, device=self.device)
 
         # Mechanical power penalty: |torque × joint_vel|
         power_rew = -torch.sum(

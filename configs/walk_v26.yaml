@@ -1,0 +1,12 @@
+# walk_v26 — fix air_time formula (held-value vs sparse spike).
+#
+# walk_v25 air_time was spike-at-touchdown-only → only 5% of policy steps
+# had non-zero contribution → averaged to -0.00006 in TB (1000× too weak).
+#
+# v26 changes (code, automatic):
+#   _held_air_delta: snapshot (swing_dur - target_swing) at each touchdown,
+#   hold value between touchdowns. Per-step reward is now continuous.
+#   Same magnitude as foot_phase / fwd_vel.
+#
+# Inherits walk_v25 (= walk_v20 + fwd_vel weight 6 + air_time weight 1.5).
+_base: walk_v25.yaml

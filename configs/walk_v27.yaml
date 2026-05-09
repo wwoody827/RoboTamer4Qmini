@@ -1,0 +1,18 @@
+# walk_v27 — milder fwd_vel + air_time to avoid "specialize bwd, abandon fwd" hack.
+#
+# walk_v26 results: @200 was incredible (vx_fwd 0.186, yaw 0.164, stride 0.125)
+# but @400+ all fwd episodes died (vx_fwd nan), policy specialized in bwd
+# (vx_bwd 0.07-0.12) + pure_yaw, abandoning fwd entirely.
+#
+# Diagnosis: fwd_vel weight 6 + air_time 1.5 too aggressive together →
+# policy attempts fast walking → falls → reward landscape shifts policy
+# toward "anything but fwd".
+#
+# v27 changes (back off):
+#   fwd_vel: 6 → 4   (still 2× walk_v20, still strong but not extreme)
+#   air_time: 1.5 → 1.0 (gentler swing-duration push)
+_base: walk_v25.yaml
+
+reward:
+  fwd_vel: 4.0
+  air_time: 1.0
