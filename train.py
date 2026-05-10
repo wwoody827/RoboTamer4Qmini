@@ -172,6 +172,10 @@ def train():
         if hasattr(gym_env.task, '_pool_curriculum') and gym_env.task._pool_curriculum is not None:
             gym_env.task._pool_curriculum.update_iter(it)
 
+        # MIRL: surface current iter to task so w_imit can anneal.
+        if hasattr(gym_env.task, 'train_iter'):
+            gym_env.task.train_iter = it
+
         start = time.time()
         rew_component_acc = None
         rew_component_steps = 0

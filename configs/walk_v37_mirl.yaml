@@ -1,0 +1,30 @@
+# walk_v37_mirl — first MIRL run on top of walk_v34 reward landscape.
+#
+# Goal: beat walk_v34 RL baseline on quality / speed / stability via
+# motion imitation. walk_v34 ckpts are the demonstrators (113 high-quality
+# traces in data/datasets/walk_v34_high_quality/, 22 min, all axes covered).
+#
+# MIRL features wired in this config:
+#   1. ref_clip_dataset: auto-loads trace paths from episodes.csv.
+#   2. ref_cmd_match: each env's clip is the closest match to its cmd
+#      (top-3 nearest by L2; sample uniformly within them — keeps diversity).
+#   3. ref_rsi_state: full RSI — robot reset to clip frame's joint + base
+#      state, with small Gaussian noise on top to preserve DR diversity.
+#   4. w_imit annealing: 0.6 → 0.1 over 5000 iters. Imitation as scaffold,
+#      RL takes over late.
+#
+# Inherits walk_v34's reward stack (LP filter, calibrated regs, etc.).
+# Adds imitation reward only.
+_base: walk_v34.yaml
+
+task:
+  ref_clip_dataset: data/datasets/walk_v34_high_quality
+  ref_cmd_match: true              # cmd-matched clip selection
+  ref_cmd_topk: 3                  # sample uniformly among 3 nearest
+  ref_rsi_state: true              # full RSI: joint+base init from clip
+  ref_rsi_jnt_noise: 0.05          # ±0.05 rad noise on joints
+  ref_rsi_vel_noise: 0.10          # ±0.10 (rad/s, m/s) noise on velocities
+  w_imit_start: 0.6                # initial imitation weight
+  w_imit_end:   0.1                # final imitation weight
+  w_imit_decay_iter: 5000          # linear interp end
+  w_task: 1.0                      # task reward stays full strength

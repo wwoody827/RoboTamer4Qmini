@@ -12,6 +12,7 @@ from env.obs_builder import ObsBuilder
 import random
 from env.utils.math import scale_transform, smallest_signed_angle_between_torch
 from collections import deque
+from pathlib import Path
 import statistics
 import torch
 
@@ -228,9 +229,26 @@ class BIRLTask(NullTask):
         self._ref_joint_vel_now = torch.zeros(self.num_envs, 10, dtype=torch.float, device=self.device)
         self._ref_phase_progress = torch.zeros(self.num_envs, 1, dtype=torch.float, device=self.device)
 
+        # Resolve ref_clip_paths. Either an explicit list, or auto-loaded from
+        # a BC dataset directory (reads episodes.csv → trace paths + relabeled cmds).
         ref_paths = getattr(self.cfg.task, 'ref_clip_paths', []) or []
+        ref_dataset = getattr(self.cfg.task, 'ref_clip_dataset', None) or None
+        ref_cmd_override = None
+        if ref_dataset and not ref_paths:
+            ref_paths, ref_cmd_override = self._resolve_ref_clip_dataset(ref_dataset)
         if ref_paths:
-            self._load_ref_clips(ref_paths)
+            self._load_ref_clips(ref_paths, cmd_override=ref_cmd_override)
+            # MIRL-specific config (cmd matching, RSI, annealing)
+            self._ref_cmd_match     = bool(getattr(self.cfg.task, 'ref_cmd_match', True) or False)
+            self._ref_cmd_topk      = int(getattr(self.cfg.task, 'ref_cmd_topk', 3) or 3)
+            self._ref_rsi_state     = bool(getattr(self.cfg.task, 'ref_rsi_state', True) or False)
+            self._ref_rsi_jnt_noise = float(getattr(self.cfg.task, 'ref_rsi_jnt_noise', 0.05) or 0.0)
+            self._ref_rsi_vel_noise = float(getattr(self.cfg.task, 'ref_rsi_vel_noise', 0.10) or 0.0)
+            self._w_imit_start      = float(getattr(self.cfg.task, 'w_imit_start', 0.5) or 0.0)
+            self._w_imit_end        = float(getattr(self.cfg.task, 'w_imit_end', 0.5) or 0.0)
+            self._w_imit_decay_iter = int(getattr(self.cfg.task, 'w_imit_decay_iter', 5000) or 5000)
+            # Iteration counter set externally by train.py — controls w_imit annealing.
+            self.train_iter = 0
 
         self.heading_ref    = torch.zeros(self.num_envs, 1, dtype=torch.float, device=self.device)
         self.last_ang_vel_z = torch.zeros(self.num_envs, 1, dtype=torch.float, device=self.device)
@@ -289,34 +307,120 @@ class BIRLTask(NullTask):
     # Reference clip loading (active when cfg.task.ref_clip_paths != [])
     # ------------------------------------------------------------------
 
-    def _load_ref_clips(self, paths):
-        """Load reference clips, pad to max length, build per-env tracking tensors."""
+    def _resolve_ref_clip_dataset(self, dataset_dir):
+        """Read episodes.csv from a BC dataset dir and return (paths, cmd_override).
+
+        cmd_override: per-clip relabeled cmd from the BC dataset
+            (cmd_relabel column) — this is the *realized* mean-velocity
+            tuple, not the originally-issued command. Using it as the
+            cmd-match key + reward target avoids the "imitation pulls
+            student toward 70%-tracking demo" pathology where the student
+            inherits the demo's tracking error as a ceiling.
+
+        Used by ref_clip_dataset: directly point to a curated dataset
+        (e.g. data/datasets/walk_v34_high_quality) without listing every
+        trace in the YAML.
+        """
+        import csv as _csv
+        import json as _json
+        repo = Path(__file__).resolve().parents[2]
+        ep_csv = repo / dataset_dir / 'episodes.csv'
+        if not ep_csv.exists():
+            print(f"[BIRLTask] WARN: ref_clip_dataset={dataset_dir!r} has no episodes.csv at {ep_csv}; ignoring")
+            return [], None
+        paths = []
+        relabeled = []
+        for row in _csv.DictReader(open(ep_csv)):
+            p = row.get('trace')
+            if not p:
+                continue
+            full = repo / p
+            if not full.exists():
+                continue
+            paths.append(str(full))
+            cmd_str = row.get('cmd_relabel') or row.get('cmd_orig') or '[0,0,0]'
+            try:
+                relabeled.append(_json.loads(cmd_str))
+            except Exception:
+                relabeled.append([0.0, 0.0, 0.0])
+        print(f"[BIRLTask] ref_clip_dataset={dataset_dir!r} → {len(paths)} trace paths, "
+              f"using cmd_relabel for cmd-match")
+        return paths, relabeled
+
+    def _load_ref_clips(self, paths, cmd_override=None):
+        """Load reference clips, pad to max length, build per-env tracking tensors.
+
+        Loads joint_pos/vel (always, used by imitation reward) and base
+        pos/quat/lin_vel/ang_vel + cmd_const (when present, used by full
+        RSI and cmd-matched clip selection).
+
+        cmd_override: optional list of [vx, vy, yaw] triples (one per path)
+            that overrides cmd_const from the .npz. Used when traces come
+            from a BC dataset that has relabeled cmds (mean realized rather
+            than issued cmd). Length must match `paths`.
+        """
         clips = []
-        for p in paths:
+        if cmd_override is not None:
+            assert len(cmd_override) == len(paths), \
+                f"cmd_override length {len(cmd_override)} != paths {len(paths)}"
+        for i, p in enumerate(paths):
             raw = np.load(p, allow_pickle=True)
-            clips.append({
+            clip = {
                 'joint_pos': torch.tensor(raw['joint_pos'], dtype=torch.float, device=self.device),
                 'joint_vel': torch.tensor(raw['joint_vel'], dtype=torch.float, device=self.device),
                 'T':         raw['joint_pos'].shape[0],
                 'dt':        float(raw['dt']),
                 'loop':      bool(raw['loop']),
                 'skill':     str(raw['skill']),
-            })
+            }
+            # Base state for full RSI (optional — fall back to default reset if absent).
+            if 'base_pos' in raw.files:
+                clip['base_pos']     = torch.tensor(raw['base_pos'],     dtype=torch.float, device=self.device)
+                clip['base_quat']    = torch.tensor(raw['base_quat'],    dtype=torch.float, device=self.device)  # (w,x,y,z)
+                clip['base_lin_vel'] = torch.tensor(raw['base_lin_vel'], dtype=torch.float, device=self.device)
+                clip['base_ang_vel'] = torch.tensor(raw['base_ang_vel'], dtype=torch.float, device=self.device)
+            # cmd: used by cmd-matched assignment. Prefer cmd_override (e.g.
+            # relabeled mean-realized cmd from BC dataset) over raw cmd_const
+            # (issued cmd) — student trained to match relabeled cmd will
+            # inherit the *demonstrated* tracking quality, not the issued/ideal.
+            if cmd_override is not None:
+                clip['cmd'] = torch.tensor(cmd_override[i], dtype=torch.float, device=self.device)
+            elif 'cmd_const' in raw.files:
+                clip['cmd'] = torch.tensor(raw['cmd_const'], dtype=torch.float, device=self.device)
+            else:
+                clip['cmd'] = torch.zeros(3, dtype=torch.float, device=self.device)
+            clips.append(clip)
         if not clips:
             return
 
         max_T = max(c['T'] for c in clips)
         num_clips = len(clips)
 
-        # Pad all clips to max_T → [num_clips, max_T, 10]
+        # Pad joint state
         jp = torch.zeros(num_clips, max_T, 10, dtype=torch.float, device=self.device)
         jv = torch.zeros(num_clips, max_T, 10, dtype=torch.float, device=self.device)
         for i, c in enumerate(clips):
             jp[i, :c['T']] = c['joint_pos']
             jv[i, :c['T']] = c['joint_vel']
-
         self._ref_jp_all = jp                                                              # [n_clips, max_T, 10]
         self._ref_jv_all = jv                                                              # [n_clips, max_T, 10]
+
+        # Pad base state if any clip has it (for full RSI)
+        self._ref_has_base = all('base_pos' in c for c in clips)
+        if self._ref_has_base:
+            self._ref_bp_all  = torch.zeros(num_clips, max_T, 3, dtype=torch.float, device=self.device)
+            self._ref_bq_all  = torch.zeros(num_clips, max_T, 4, dtype=torch.float, device=self.device)
+            self._ref_blv_all = torch.zeros(num_clips, max_T, 3, dtype=torch.float, device=self.device)
+            self._ref_bav_all = torch.zeros(num_clips, max_T, 3, dtype=torch.float, device=self.device)
+            for i, c in enumerate(clips):
+                self._ref_bp_all[i,  :c['T']] = c['base_pos']
+                self._ref_bq_all[i,  :c['T']] = c['base_quat']
+                self._ref_blv_all[i, :c['T']] = c['base_lin_vel']
+                self._ref_bav_all[i, :c['T']] = c['base_ang_vel']
+
+        # Per-clip cmd_const for cmd-matched selection
+        self._ref_cmd_all = torch.stack([c['cmd'] for c in clips], dim=0)                  # [n_clips, 3]
+
         self._ref_clip_lengths = torch.tensor([c['T'] for c in clips], dtype=torch.long,  # [n_clips]
                                               device=self.device)
         self._ref_num_clips = num_clips
@@ -331,18 +435,71 @@ class BIRLTask(NullTask):
         self._update_ref_state()
 
         self._has_ref = True
-        print(f"[BIRLTask] Loaded {num_clips} reference clip(s): "
-              + ", ".join(f"{c['skill']}({c['T']} frames)" for c in clips))
+        print(f"[BIRLTask] Loaded {num_clips} reference clip(s) "
+              f"(base_state: {'yes' if self._ref_has_base else 'no'}, "
+              f"cmd_const: yes), max_T={max_T}")
 
     def _assign_ref_clips(self, env_ids):
-        """Randomly assign one of the loaded clips to each env (RSI: random start frame)."""
-        self._ref_clip_id[env_ids] = torch.randint(
-            0, self._ref_num_clips, (len(env_ids),), device=self.device
-        )
+        """Assign each env a clip (cmd-matched if enabled) + random start frame (RSI)."""
+        n = len(env_ids)
+        if getattr(self, '_ref_cmd_match', False) and self._ref_num_clips > 1:
+            # Pick top-K nearest clips by L2 (yaw weighted 0.5×) then sample uniformly.
+            cmds = self.commands[env_ids, :3]                                              # [n, 3]
+            w = torch.tensor([1.0, 1.0, 0.5], device=self.device)
+            d = ((cmds.unsqueeze(1) - self._ref_cmd_all.unsqueeze(0)) * w).pow(2).sum(-1)  # [n, n_clips]
+            k = min(self._ref_cmd_topk, self._ref_num_clips)
+            _, topk_idx = d.topk(k, dim=-1, largest=False)                                 # [n, k]
+            pick = torch.randint(0, k, (n,), device=self.device)
+            self._ref_clip_id[env_ids] = topk_idx.gather(1, pick.unsqueeze(1)).squeeze(1)
+        else:
+            self._ref_clip_id[env_ids] = torch.randint(
+                0, self._ref_num_clips, (n,), device=self.device
+            )
         lengths = self._ref_clip_lengths[self._ref_clip_id[env_ids]]
-        rand_frames = (torch.rand(len(env_ids), device=self.device) * lengths.float()).long()
+        rand_frames = (torch.rand(n, device=self.device) * lengths.float()).long()
         self._ref_frame_idx[env_ids] = rand_frames
         self._ref_frame_frac[env_ids] = 0.0
+
+    def get_reset_state(self, env_ids):
+        """Hook called by legged_robot._reset_dofs / _reset_root_states.
+
+        Returns (joint_pos, joint_vel, base_state[N,13]) loaded from clip frames
+        (with optional small Gaussian noise) when full RSI is enabled, else None.
+        Caller falls back to default reset behavior on None.
+        """
+        if not (self._has_ref and getattr(self, '_ref_rsi_state', False) and getattr(self, '_ref_has_base', False)):
+            return None
+        cid = self._ref_clip_id[env_ids]                                                   # [n]
+        fid = self._ref_frame_idx[env_ids]                                                 # [n]
+        jp = self._ref_jp_all[cid, fid].clone()                                            # [n, 10]
+        jv = self._ref_jv_all[cid, fid].clone()
+        bp = self._ref_bp_all[cid, fid].clone()                                            # [n, 3] world pos
+        bq = self._ref_bq_all[cid, fid].clone()                                            # [n, 4] (w,x,y,z)
+        blv = self._ref_blv_all[cid, fid].clone()                                          # [n, 3]
+        bav = self._ref_bav_all[cid, fid].clone()                                          # [n, 3]
+        # Add DR-friendly Gaussian perturbation
+        n_jnt = jp.shape[-1]
+        if self._ref_rsi_jnt_noise > 0:
+            jp += self._ref_rsi_jnt_noise * (2 * torch.rand_like(jp) - 1)
+            jv += self._ref_rsi_vel_noise * (2 * torch.rand_like(jv) - 1)
+        if self._ref_rsi_vel_noise > 0:
+            blv += self._ref_rsi_vel_noise * (2 * torch.rand_like(blv) - 1)
+            bav += self._ref_rsi_vel_noise * (2 * torch.rand_like(bav) - 1)
+        # Re-quat-normalize after potential noise (none added here, but cheap insurance)
+        bq = bq / (bq.norm(dim=-1, keepdim=True).clamp(min=1e-6))
+        # base_state ordering matches Isaac Gym actor_root_state: [pos(3), quat(4), lin_vel(3), ang_vel(3)]
+        # Trace base_quat is (w,x,y,z); Isaac expects (x,y,z,w). Convert.
+        bq_xyzw = torch.cat([bq[..., 1:], bq[..., :1]], dim=-1)
+        base_state = torch.cat([bp, bq_xyzw, blv, bav], dim=-1)                            # [n, 13]
+        return {'joint_pos': jp, 'joint_vel': jv, 'base_state': base_state}
+
+    def w_imit_now(self):
+        """Annealed imitation weight; always defined (returns w_imit_start when ref disabled)."""
+        if not self._has_ref:
+            return 0.0
+        decay = max(int(getattr(self, '_w_imit_decay_iter', 5000)), 1)
+        a = min(self.train_iter / decay, 1.0)
+        return (1 - a) * self._w_imit_start + a * self._w_imit_end
 
     def _update_ref_state(self):
         """Vectorised lookup: read current ref joint_pos/vel for every env."""
@@ -557,6 +714,12 @@ class BIRLTask(NullTask):
         env_ids = ((self.env.episode_length_buf) % self.resampling_interval == 0).nonzero(as_tuple=False).flatten()
         if len(env_ids) > 0:
             self._resample_commands(env_ids)
+            # MIRL: cmd just changed mid-episode → re-match ref clip + RSI frame
+            # (only frame reset, not full robot-state RSI which would teleport
+            # mid-stride). Keeps imitation reward signal aligned with new cmd.
+            if self._has_ref:
+                self._assign_ref_clips(env_ids)
+                self._update_ref_state()
 
         if self.cfg.domain_rand.delay_observation and self.env.common_step_counter % 200 == 0:
             self.delay_joint_steps = random.randint(self.cfg.domain_rand.delay_joint_ranges[0],
@@ -1027,10 +1190,12 @@ class BIRLTask(NullTask):
             air_time=air_time_rew * w.get('air_time', 0.0),
         )
 
-        # Imitation rewards (only active when reference clips are loaded)
+        # Imitation rewards (only active when reference clips are loaded).
+        # w_imit is annealed via self.train_iter (set by train.py each iter).
+        # When w_imit_start == w_imit_end, behaves like a constant weight.
         if self._has_ref:
-            w_imit = getattr(self.cfg.task, 'w_imit', 0.5)
-            w_task = getattr(self.cfg.task, 'w_task', 0.5)
+            w_imit = self.w_imit_now()
+            w_task = float(getattr(self.cfg.task, 'w_task', 1.0) or 1.0)
 
             jp_imit = torch.exp(
                 -5.0 * torch.norm(self.joint_pos - self._ref_joint_pos_now, dim=1, keepdim=True) ** 2

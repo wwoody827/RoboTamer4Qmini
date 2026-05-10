@@ -1,0 +1,30 @@
+# walk_v38_mirl — fix v37 bug: use cmd_relabel for cmd-match, not cmd_const.
+#
+# v37 used the *issued* cmd (cmd_const) as the cmd-match key. So when env
+# sampled cmd_vy=0.3 we matched the demo whose issued cmd was 0.3 — but
+# that demo only realized vy≈0.22 (73% efficient). Student then imitated
+# a "73%-tracking" gait, inheriting the demo's tracking error as a ceiling.
+#
+# v38 uses cmd_relabel (mean realized on commanded axes) as the match key.
+# Now env cmd=0.3 matches the demo whose REALIZED motion was ~0.3 (i.e.,
+# demo originally issued ~0.4 but achieved 0.3). Student imitates a gait
+# that genuinely produced cmd=0.3 motion → no efficiency loss.
+#
+# Implementation: scripts/build_bc_dataset.py already writes cmd_relabel
+# to episodes.csv. _resolve_ref_clip_dataset now reads that column and
+# overrides cmd_const at clip-load time (env/tasks/birl_task.py).
+#
+# Inherits walk_v34. Only MIRL fields (and the cmd-match fix) added.
+_base: walk_v34.yaml
+
+task:
+  ref_clip_dataset: data/datasets/walk_v34_high_quality
+  ref_cmd_match: true
+  ref_cmd_topk: 3
+  ref_rsi_state: true
+  ref_rsi_jnt_noise: 0.05
+  ref_rsi_vel_noise: 0.10
+  w_imit_start: 0.6
+  w_imit_end:   0.1
+  w_imit_decay_iter: 5000
+  w_task: 1.0

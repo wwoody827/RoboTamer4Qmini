@@ -1,6 +1,6 @@
-created: '2026-05-10T10:14:51'
+created: '2026-05-10T13:16:10'
 input: data/traces/walk_v34_multi
-git_commit: d424aa2c90b7076e8821cd5425779d7daa5b8f84
+git_commit: 9fe40994e539095d2b471f6dc4f04027cafc1ea1
 git_dirty: true
 args:
   include: clean
@@ -11,15 +11,16 @@ args:
   cmd_active_thresh: 0.05
   deadzone: 0.02
 counts:
-  clean: 382
-  drift: 44
+  clean: 420
+  drift: 60
   failure: 3
-  kept: 113
+  kept: 122
   invalid: 0
-  low_eff: 230
-  high_yaw_drift: 23
-  high_tilt: 16
-total_frames: 88140
+  low_eff: 255
+  high_yaw_drift: 25
+  high_tilt: 17
+  high_torque: 1
+total_frames: 95160
 meta:
   phase_mode: input
   action_mode: absolute

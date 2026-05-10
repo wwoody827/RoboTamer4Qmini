@@ -434,17 +434,32 @@ class LeggedRobotEnv:
         Positions are randomly selected within 0.5:1.5 x default positions.
         Velocities are set to zero.
 
+        When self.task implements get_reset_state() (MIRL full RSI), DOF and
+        root state are loaded from a reference clip frame instead of defaults.
+        See env/tasks/birl_task.py::get_reset_state.
+
         Args:
             env_ids (List[int]): Environemnt ids
         """
-        if not self.render and self.cfg.init_state.random_rot:
-            reset_dof_pos_noise = 0.1 * (2 * torch.ones_like(self.joint_pos[env_ids]) - 1.)
-            reset_dof__vel_noise = 2. * (2 * torch.ones_like(self.joint_vel[env_ids]) - 1.)
+        # MIRL full RSI hook
+        rsi = None
+        if hasattr(self, 'task') and hasattr(self.task, 'get_reset_state'):
+            rsi = self.task.get_reset_state(env_ids)
+        if rsi is not None:
+            self.joint_pos[env_ids] = rsi['joint_pos']
+            self.joint_vel[env_ids] = rsi['joint_vel']
+            self._rsi_pending_root = rsi['base_state']  # picked up by _reset_root_states
+            self._rsi_pending_envs = env_ids
         else:
-            reset_dof_pos_noise = 0
-            reset_dof__vel_noise = 0
-        self.joint_pos[env_ids] = self.reset_joint_pos[env_ids, :] + reset_dof_pos_noise
-        self.joint_vel[env_ids] = self.reset_joint_vel[env_ids, :] + reset_dof__vel_noise
+            if not self.render and self.cfg.init_state.random_rot:
+                reset_dof_pos_noise = 0.1 * (2 * torch.ones_like(self.joint_pos[env_ids]) - 1.)
+                reset_dof__vel_noise = 2. * (2 * torch.ones_like(self.joint_vel[env_ids]) - 1.)
+            else:
+                reset_dof_pos_noise = 0
+                reset_dof__vel_noise = 0
+            self.joint_pos[env_ids] = self.reset_joint_pos[env_ids, :] + reset_dof_pos_noise
+            self.joint_vel[env_ids] = self.reset_joint_vel[env_ids, :] + reset_dof__vel_noise
+            self._rsi_pending_root = None
         self.last_dof_vel[:] = self.joint_vel[:].clone()
 
         env_id_int32 = env_ids.to(dtype=torch.int32)
@@ -457,9 +472,27 @@ class LeggedRobotEnv:
         """ Resets ROOT states position and velocities of selected environmments
             Sets base position based on the curriculum
             Selects randomized base velocities within -0.5:0.5 [m/s, rad/s]
+
+            When MIRL full RSI is enabled (self._rsi_pending_root populated by
+            _reset_dofs), root state comes from the clip frame instead of
+            defaults. xy origin is still added so envs don't collide.
         Args:
             env_ids (List[int]): Environemnt ids
         """
+        # MIRL full RSI: load from clip frame
+        if getattr(self, '_rsi_pending_root', None) is not None:
+            base_state = self._rsi_pending_root  # [N, 13] (pos, quat xyzw, lin_vel, ang_vel)
+            self.root_states[env_ids] = base_state
+            # Z keep from clip; XY → env_origins so envs don't collide
+            self.root_states[env_ids, 0:2] = self.env_origins[env_ids, 0:2]
+            self.last_base_lvel[:] = self.root_states[:, 7:10]
+            env_id_int32 = env_ids.to(dtype=torch.int32)
+            self.gym.set_actor_root_state_tensor_indexed(self.sim,
+                                                         gymtorch.unwrap_tensor(self.root_states),
+                                                         gymtorch.unwrap_tensor(env_id_int32), len(env_id_int32))
+            self._rsi_pending_root = None
+            return
+
         init_rpy = 0.2 * (2 * torch.rand_like(self.base_euler) - 1.) if self.cfg.init_state.random_rot else torch.zeros_like(self.base_euler)
         self.rot = quat_from_euler_xyz(init_rpy[:, 0], init_rpy[:, 1], init_rpy[:, 2])
 
