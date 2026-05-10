@@ -138,7 +138,19 @@ def main():
                    help='Stricter than drift_thresh_yaw: drop trace if '
                         'uncommanded yaw drift exceeds this (e.g. 0.10 for '
                         'strafe-priority). Defaults to drift_thresh_yaw.')
+    p.add_argument('--max_tilt_deg', type=float, default=None,
+                   help='Drop trace if metric_max_tilt_deg exceeds this '
+                        '(e.g. 10°) — flags near-tipping moments even if '
+                        'survived. Default: off.')
+    p.add_argument('--max_peak_tau_ratio', type=float, default=None,
+                   help='Drop trace if peak |torque|/effort_limit exceeds '
+                        'this (e.g. 1.2) — flags motor saturation, sim2real '
+                        'risk. Computed from torque trace if available. Off by default.')
     args = p.parse_args()
+
+    # Effort limits (Nm) per joint — used for peak_tau_ratio computation.
+    # Order matches NUM_JOINTS: hip_yaw, hip_roll, hip_pitch, knee, ankle (×2 legs).
+    EFFORT_LIMITS = np.array([20., 60., 20., 20., 20., 20., 60., 20., 20., 20.], dtype=np.float32)
 
     in_root = Path(args.input).resolve()
     out_root = Path(args.output).resolve()
@@ -206,6 +218,21 @@ def main():
             if abs(cmd_orig_arr[2]) < args.cmd_active_thresh and drift[2] > args.max_uncmd_drift_yaw:
                 counts.setdefault('high_yaw_drift', 0)
                 counts['high_yaw_drift'] += 1
+                continue
+        # 3) tilt cap (near-tipping moments even if survived)
+        if args.max_tilt_deg is not None and 'metric_max_tilt_deg' in d.files:
+            tilt = float(d['metric_max_tilt_deg'])
+            if tilt > args.max_tilt_deg:
+                counts.setdefault('high_tilt', 0)
+                counts['high_tilt'] += 1
+                continue
+        # 4) peak torque ratio (motor saturation flag)
+        if args.max_peak_tau_ratio is not None and 'torque' in d.files:
+            tau = d['torque']
+            peak_ratio = float(np.max(np.abs(tau) / EFFORT_LIMITS))
+            if peak_ratio > args.max_peak_tau_ratio:
+                counts.setdefault('high_torque', 0)
+                counts['high_torque'] += 1
                 continue
 
         T = int(d['joint_pos'].shape[0])

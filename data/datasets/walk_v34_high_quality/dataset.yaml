@@ -1,0 +1,31 @@
+created: '2026-05-10T10:14:51'
+input: data/traces/walk_v34_multi
+git_commit: d424aa2c90b7076e8821cd5425779d7daa5b8f84
+git_dirty: true
+args:
+  include: clean
+  relabel: cmd_axes
+  drift_thresh_vx: 0.05
+  drift_thresh_vy: 0.2
+  drift_thresh_yaw: 0.2
+  cmd_active_thresh: 0.05
+  deadzone: 0.02
+counts:
+  clean: 382
+  drift: 44
+  failure: 3
+  kept: 113
+  invalid: 0
+  low_eff: 230
+  high_yaw_drift: 23
+  high_tilt: 16
+total_frames: 88140
+meta:
+  phase_mode: input
+  action_mode: absolute
+  action_dim: 10
+  obs_dim: 43
+  obs_history: 5
+  obs_skip: 2
+  lp_alpha: 0.75
+  num_legs: 2

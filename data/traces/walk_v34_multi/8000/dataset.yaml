@@ -1,0 +1,11 @@
+created: '2026-05-10T10:09:58'
+policy_path: experiments/20260509_2239_walk_v34/deploy/policy_8000.onnx
+policy_sha256: 66b378f1553fd8741b269cd7dc60993f04af601d1ca681b840790f5bb8cac117
+policy_manifest: experiments/20260509_2239_walk_v34/deploy/policy_8000_manifest.yaml
+git_commit: d424aa2c90b7076e8821cd5425779d7daa5b8f84
+git_dirty: true
+args:
+  duration: 12.0
+  cmd_freq: null
+  floor_friction: null
+  grid: default
