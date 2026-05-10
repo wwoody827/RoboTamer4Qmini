@@ -166,11 +166,6 @@ command:
   lin_vel_y_range: [-0.3, 0.3]
   ang_vel_yaw_range: [-1, 1]
   heading_range: [0., 3.141592653589793]
-  # When true, lin_vel_x_norm (used by most regulatory rewards) includes
-  # cmd_yaw — so pure_yaw cmds don't hit the static-velocity-norm floor
-  # that over-regulates turning-in-place. Recommended for any setup that
-  # uses regime sampling with pure_yaw mode.
-  norm_includes_yaw: false
 
 terrain:
   mesh_type: trimesh

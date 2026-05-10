@@ -1,0 +1,59 @@
+# walk_v34 — current best baseline. Self-contained (inherits walk_v27).
+#
+# Key insight: cmd_track_lp_alpha=0.95 makes tracking error use a 290 ms EMA
+# of body velocity instead of per-step. Gait sway (zero-mean within-stride
+# oscillation) averages out, leaving only DC offset (real tracking quality)
+# in the reward. This defeats Jensen-style reward gaming and unlocks both
+# yaw drift control and real strafe behavior.
+#
+# Result vs walk_v27:
+#   vx_fwd:           0.058 → 0.038   (-34 %)
+#   yaw_err:          0.238 → 0.142   (-40 %)
+#   yaw_drift_pass:   ~0.42 → 0.015   (28× better)
+#   strafe disp_y:    no strafe → 1.59 m  (first time real)
+#   vx_bwd:           0.070 → 0.100   (slight regression — known asymmetry)
+#
+# Best ckpts: policy_2800 (unified), policy_3200 (best disp_y), policy_4200 (best yaw).
+# Full report: docs/walk_v34_summary.md
+#
+# Lineage absorbed (v30 reg calibration, v32 slope tuning, v33 regime/resample,
+# v34 LP filter). v35 (slope reduction) and v36 (yaw deadzone) were tried as
+# follow-ups and both regressed — see commit log.
+_base: walk_v27.yaml
+
+reward:
+  # ── Reg calibration (industry-aligned scale, no 1/lin_vel_x_norm amplification)
+  reg_use_norm_scaling: false   # disable 1/lin_vel_x_norm multiplier on regs
+  act_smo:        0.30          # was 1.5 — 5× lower, still smooth enough
+  act_const:      0.02          # was 0.2
+  sa_const:       0.01          # was 0.1
+  jnt_pos_err:    0.02          # was 0.2
+  foot_sft:       0.5           # was 2.7
+  foot_slip:      0.05          # was 0.5
+  foot_vz:        0.02          # was 0.2
+  foot_acc:       0.005         # was 0.05
+  jnt_vel:        0.001         # matches legged_gym dof_vel = -1e-3
+  joint_tor:      0.0001        # was 0.001
+  net_smo:        0.001         # was 0.001 (kept)
+  net_out_val:    0.00001       # was 0.0001
+  base_acc:       0.01          # was 0.1
+
+  # ── Tracking weights (industry-aligned, lateral promoted to match yaw urgency)
+  fwd_vel:        2.0           # was 4 (walk_v27 bumped); back toward base
+  yaw_rat:        3.0           # was 8; healthier ratio with regs
+  lateral_vel:    2.0           # was 0.7; same urgency as yaw
+
+  # ── Tracking slopes (steeper near 0 → finer gradient)
+  fwd_err_slope:      3.0       # was 2
+  lateral_err_slope:  5.0       # was 3
+  yaw_err_slope:      3.0       # was 2
+
+  # ── 🏆 The breakthrough: low-pass on tracked body vel/ang for reward computation
+  # Defeats gait-sway-impersonating-strafe + risk-averse yaw oscillation gaming.
+  cmd_track_lp_alpha: 0.95      # 290 ms EMA TC at 67 Hz policy rate
+
+command:
+  resampling_time: 10.0         # was 5; full episode = single cmd, gait converges
+  regime_weights: [1.0, 2.0, 1.0, 1.5, 1.5]
+  # mode 0/1/2/3/4 = pure_vx / pure_vy / pure_yaw / vx+vy / vx+yaw
+  # weights → 14% / 28% / 14% / 21% / 21% (pure_vy bumped from 17% to 28%)

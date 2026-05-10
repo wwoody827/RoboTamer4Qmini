@@ -411,7 +411,14 @@ class BIRLTask(NullTask):
             self.commands[env_ids[~is_vy_mode], 1] = 0   # mode B: zero vy
         elif regime == 'pure_and_pairs':
             # mode 0: pure_vx, 1: pure_vy, 2: pure_yaw, 3: vx+vy, 4: vx+yaw
-            weights = torch.tensor([1/6, 1/6, 1/6, 1/4, 1/4], device=self.device)
+            # Default ratio biases toward singletons (matches typical deploy mix).
+            # Override via cfg.command.regime_weights (5 floats, auto-normalized).
+            _w = getattr(self.cfg.command, 'regime_weights', None)
+            if _w is None:
+                weights = torch.tensor([1/6, 1/6, 1/6, 1/4, 1/4], device=self.device)
+            else:
+                weights = torch.tensor(list(_w), dtype=torch.float, device=self.device)
+                weights = weights / weights.sum()
             mode = torch.multinomial(weights, n, replacement=True)
             # Pure: zero the other two dims
             self.commands[env_ids[mode == 0], 1] = 0     # pure_vx → vy=0
@@ -744,18 +751,20 @@ class BIRLTask(NullTask):
 
     def reward(self):
         constant_rew = to_torch([1.]).repeat(self.num_envs, 1)
-        # `lin_vel_x_norm` scales most regulatory rewards (balance, ang_vel,
-        # vertical_vel, foot_soft, jnt_vel, ...). Originally norm of [vx, vy]
-        # only — but pure_yaw (cmd_vx=cmd_vy=0, cmd_yaw≠0) hits the floor 0.3
-        # and over-regulates (max-strength penalty for any motion), making
-        # turning-in-place very hard to learn. Set `command.norm_includes_yaw`
-        # = true to also include cmd_yaw, so non-zero yaw cmds relax regulation.
-        if getattr(self.cfg.command, 'norm_includes_yaw', False):
-            lin_vel_x_norm = torch.clip(torch.norm(self.commands[:, :3], dim=1, keepdim=True), min=0.3, max=2.) + 0.2
+        # `lin_vel_x_norm` historically scaled stability rewards (balance,
+        # vertical_vel, ang_vel) and regulators in low-cmd modes. Norm of
+        # [vx, vy] cmd only, clipped to [0.3, 2.0]. Stability rewards still
+        # use this. Regulators bypass it via reg_use_norm_scaling=false
+        # (walk_v34+) since the 1/norm amplification fights tracking.
+        lin_vel_x_norm = torch.clip(torch.norm(self.commands[:, [0, 1]], dim=1, keepdim=True), min=0.3, max=2.) + 0.2
+        # Regulator scaling factor: industry-standard repos (legged_gym, G1,
+        # humanoid-gym) use constant reg coefficients. Our 1/lin_vel_x_norm
+        # scaling amplifies regs in pure_yaw mode (norm=0.5 floor → factor 2),
+        # fighting yaw tracking. Disable via reward.reg_use_norm_scaling=false.
+        if getattr(self.cfg.reward, 'reg_use_norm_scaling', True):
+            reg_norm_inv = reg_norm_inv
         else:
-            lin_vel_x_norm = torch.clip(torch.norm(self.commands[:, [0, 1]], dim=1, keepdim=True), min=0.3, max=2.) + 0.2
-        # (yaw_rate_norm previously used by Gaussian yaw reward; replaced by
-        # linear cmd-tracking in walk_v2+, no longer referenced.)
+            reg_norm_inv = torch.ones_like(lin_vel_x_norm)
         base_heit_rew = torch.exp(-70 * (self.env.base_pos[:, [2]] - 0.45) ** 2)
 
         balance_rew = 0.5 * (base_heit_rew * torch.exp(-torch.clip(5. / lin_vel_x_norm, min=2, max=8.) * torch.norm(self.env.base_euler[:, :2], dim=-1, keepdim=True)) + 1.)
@@ -807,12 +816,12 @@ class BIRLTask(NullTask):
         ang_vel_rew = torch.exp(
             -torch.clip(2. / lin_vel_x_norm, min=0.7, max=6.) * torch.norm(self.env.base_ang_vel[:, :2], dim=1,
                                                                             keepdim=True) ** 2)
-        base_acc_rew = -0.4 / lin_vel_x_norm * torch.norm((self.env.base_acc - to_torch([0, 0, 9.81], device=self.device)) * 0.1, dim=1, keepdim=True)
+        base_acc_rew = -0.4 * reg_norm_inv * torch.norm((self.env.base_acc - to_torch([0, 0, 9.81], device=self.device)) * 0.1, dim=1, keepdim=True)
         base_acc_rew *= self.static_flag
 
         vertical_vel_rew = torch.exp(-torch.clip(5. / lin_vel_x_norm, min=2., max=10.) * torch.norm(self.env.base_lin_vel[:, [2]], dim=1,
                                                                            keepdim=True) ** 2)
-        vertical_vel_rew -= 0.2 / lin_vel_x_norm * torch.norm(self.env.base_lin_vel[:, [2]], dim=1, keepdim=True) * self.static_flag
+        vertical_vel_rew -= 0.2 * reg_norm_inv * torch.norm(self.env.base_lin_vel[:, [2]], dim=1, keepdim=True) * self.static_flag
 
         support_foot_index = torch.where(self.env.foot_frc >= 10., True, False)
         swing_foot_index = torch.where(self.env.foot_frc < 1., True, False)
@@ -833,7 +842,7 @@ class BIRLTask(NullTask):
         twist_rew = -torch.norm(self.env.base_euler[:, :2], dim=-1, keepdim=True)
 
         self.foot_frc_acc = (self.env.foot_frc - self.last_foot_frc).clone()
-        foot_soft_rew = -0.1 * torch.clip(1. / lin_vel_x_norm, min=0., max=1.5) * torch.norm(self.foot_frc_acc, dim=1, keepdim=True) / 100.
+        foot_soft_rew = -0.1 * torch.clip(reg_norm_inv, min=0., max=1.5) * torch.norm(self.foot_frc_acc, dim=1, keepdim=True) / 100.
 
         self.last_foot_frc = self.env.foot_frc.clone().detach()
 
@@ -858,50 +867,50 @@ class BIRLTask(NullTask):
         foot_slip_rew += 0.3 * torch.norm(torch.norm(self.env.foot_vel.view(self.num_envs, self.num_legs, -1)[:, :, :2], dim=-1), dim=1, keepdim=True) * (
                 self.static_flag - 1.)
 
-        foot_slip_rew += -0.3 / lin_vel_x_norm * torch.norm(
+        foot_slip_rew += -0.3 * reg_norm_inv * torch.norm(
             0.1 * torch.norm(self.env.foot_vel.view(self.num_envs, self.num_legs, -1)[:, :, :2], dim=-1) / clip_foot_h * self.foot_support_mask, dim=1,
             keepdim=True) * self.static_flag
 
-        foot_vz_rew = -0.1 * torch.clip(1. / lin_vel_x_norm, min=0., max=1.) * torch.norm(
+        foot_vz_rew = -0.1 * torch.clip(reg_norm_inv, min=0., max=1.) * torch.norm(
             torch.norm(self.env.foot_vel.view(self.num_envs, self.num_legs, -1)[:, :, [2]].clip(max=0.), dim=-1) / clip_foot_h,
             dim=1, keepdim=True) * self.static_flag
 
-        foot_vz_rew += 0.8 * torch.clip(1. / lin_vel_x_norm, min=0., max=1.) * torch.norm(
+        foot_vz_rew += 0.8 * torch.clip(reg_norm_inv, min=0., max=1.) * torch.norm(
             torch.norm(self.env.foot_vel.view(self.num_envs, self.num_legs, -1)[:, :, [2]].clip(max=0.), dim=-1),
             dim=1, keepdim=True) * (self.static_flag - 1.)
 
-        foot_acc_rew = -0.4 * torch.clip(1. / lin_vel_x_norm, min=0., max=2.) * torch.norm(self.env.foot_vel[:, [2, 5]], dim=1, keepdim=True)
+        foot_acc_rew = -0.4 * torch.clip(reg_norm_inv, min=0., max=2.) * torch.norm(self.env.foot_vel[:, [2, 5]], dim=1, keepdim=True)
 
-        action_smooth_rew = -0.3 * torch.clip(1. / lin_vel_x_norm, min=0., max=2.) * torch.norm(
+        action_smooth_rew = -0.3 * torch.clip(reg_norm_inv, min=0., max=2.) * torch.norm(
             self.action_history[-3] - 2. * self.action_history[-2] + self.action_history[-1], dim=1, keepdim=True)
         # net_out smoothness: skip freq prefix when phase.mode == 'output'
         _jo = self.num_legs if self._phase_mode == 'output' else 0  # joint offset
-        net_out_smooth_rew = -0.2 * torch.clip(1. / lin_vel_x_norm, min=0., max=2.) * torch.norm(
+        net_out_smooth_rew = -0.2 * torch.clip(reg_norm_inv, min=0., max=2.) * torch.norm(
             (self.net_out_history[-3] - 2 * self.net_out_history[-2] + self.net_out_history[-1])[:, _jo:], dim=1, keepdim=True) ** 2
 
-        action_constraint_rew = -0.1 * torch.clip(1. / lin_vel_x_norm, 0, 1.) * torch.norm((self.current_joint_act - self.ref_joint_action), dim=1, keepdim=True)
+        action_constraint_rew = -0.1 * torch.clip(reg_norm_inv, 0, 1.) * torch.norm((self.current_joint_act - self.ref_joint_action), dim=1, keepdim=True)
         # hip_yaw/hip_roll deviation penalty — only when NEITHER strafing
         # nor turning. Otherwise turning policy needs hip_yaw motion, was
         # being penalized for it.
         action_constraint_rew += -3. * torch.norm(((self.current_joint_act - self.ref_joint_action)[:, [0, 1, 5, 6]]), dim=1, keepdim=True) * self.static_flag * (1. - vy_walking) * (1. - yaw_walking)
 
-        sa_constraint_rew = -0.1 * torch.clip(1. / lin_vel_x_norm, min=0., max=1.) * torch.norm(self.current_joint_act - self.ref_joint_action, dim=1,keepdim=True) ** 2 * self.static_flag
+        sa_constraint_rew = -0.1 * torch.clip(reg_norm_inv, min=0., max=1.) * torch.norm(self.current_joint_act - self.ref_joint_action, dim=1,keepdim=True) ** 2 * self.static_flag
 
-        sa_constraint_rew += -self.static_flag * torch.clip(1. / lin_vel_x_norm, 0, 1) * torch.norm(
+        sa_constraint_rew += -self.static_flag * torch.clip(reg_norm_inv, 0, 1) * torch.norm(
             ((self.env.joint_pos - self.ref_joint_action)[:, :5] * support_foot_index[:, [0]]), dim=1,
             keepdim=True) ** 2
-        sa_constraint_rew += -self.static_flag * torch.clip(1. / lin_vel_x_norm, 0, 1) * torch.norm(
+        sa_constraint_rew += -self.static_flag * torch.clip(reg_norm_inv, 0, 1) * torch.norm(
             ((self.env.joint_pos - self.ref_joint_action)[:, 5:] * support_foot_index[:, [1]]), dim=1,
             keepdim=True) ** 2
 
-        joint_pos_error_rew = - 0.4 * torch.clip(1. / lin_vel_x_norm, min=0., max=1.) * torch.norm((self.current_joint_act - self.env.joint_pos), dim=1,keepdim=True) ** 2
+        joint_pos_error_rew = - 0.4 * torch.clip(reg_norm_inv, min=0., max=1.) * torch.norm((self.current_joint_act - self.env.joint_pos), dim=1,keepdim=True) ** 2
 
-        joint_velocity_rew = -0.4 * torch.clip(1. / lin_vel_x_norm, min=0., max=1.) * torch.norm(self.env.joint_vel[:, :], dim=1,keepdim=True) ** 2
+        joint_velocity_rew = -0.4 * torch.clip(reg_norm_inv, min=0., max=1.) * torch.norm(self.env.joint_vel[:, :], dim=1,keepdim=True) ** 2
         # hip_yaw/hip_roll velocity penalty — same gating as act_const.
         # Yaw and strafe both legitimately need fast hip motion.
-        joint_velocity_rew += -torch.clip(1. / lin_vel_x_norm, 0, 1) * torch.norm(self.env.joint_vel[:, [0, 1, 5, 6]], dim=1,keepdim=True) ** 2 * (1. - vy_walking) * (1. - yaw_walking)
+        joint_velocity_rew += -torch.clip(reg_norm_inv, 0, 1) * torch.norm(self.env.joint_vel[:, [0, 1, 5, 6]], dim=1,keepdim=True) ** 2 * (1. - vy_walking) * (1. - yaw_walking)
 
-        joint_tor_rew = -0.4 * torch.clip(1. / lin_vel_x_norm, min=0., max=2.) * torch.sum(
+        joint_tor_rew = -0.4 * torch.clip(reg_norm_inv, min=0., max=2.) * torch.sum(
             (torch.abs(self.env.react_tau[:, :]) - self.env.torque_limits[:]).clip(min=0.), dim=1, keepdim=True)
 
         joint_tor_rew *= self.static_flag
@@ -910,15 +919,15 @@ class BIRLTask(NullTask):
 
         # PMF reward: only meaningful when phase.mode == 'output' (freq prefix exists)
         if self._phase_mode == 'output':
-            pmf_rew = -0.02 * torch.clip(1. / lin_vel_x_norm, min=0., max=1.) * torch.norm(
+            pmf_rew = -0.02 * torch.clip(reg_norm_inv, min=0., max=1.) * torch.norm(
                 (self.net_out_history[-3] - 2 * self.net_out_history[-2] + self.net_out_history[-1])[:, :self.num_legs],
                 dim=1, keepdim=True)
-            pmf_rew += -0.5 * torch.clip(1 / lin_vel_x_norm, 0, 1.) * torch.norm(self.net_out_history[-1][:, :self.num_legs] * self.foot_support_mask, dim=1, keepdim=True) ** 2
+            pmf_rew += -0.5 * torch.clip(reg_norm_inv, 0, 1.) * torch.norm(self.net_out_history[-1][:, :self.num_legs] * self.foot_support_mask, dim=1, keepdim=True) ** 2
             pmf_rew *= self.static_flag
         else:
             pmf_rew = torch.zeros(self.num_envs, 1, device=self.device)
 
-        net_out_val_rew = -0.4 * torch.clip(1. / lin_vel_x_norm, min=0., max=1.) * torch.norm(self.net_out_history[-1][:, _jo:], dim=1, keepdim=True) ** 2
+        net_out_val_rew = -0.4 * torch.clip(reg_norm_inv, min=0., max=1.) * torch.norm(self.net_out_history[-1][:, _jo:], dim=1, keepdim=True) ** 2
         foot_py_rew = -0.5 * (torch.norm(self.env.foot_euler[:, [1, 4]], dim=1, keepdim=True))
 
         leg_width_rew = -torch.norm(torch.abs(self.env.foot_pos_hd[:, [1, 4]] - self.env.base_pos_hd[:, [1]]) - 0.14, dim=1, keepdim=True)

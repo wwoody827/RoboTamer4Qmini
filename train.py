@@ -290,6 +290,8 @@ def train():
                           f'vx_err fwd={_metrics.get("sim2sim/vx_err_fwd", float("nan")):.3f} '
                           f'bwd={_metrics.get("sim2sim/vx_err_bwd", float("nan")):.3f}  '
                           f'yaw_err={_metrics.get("sim2sim/yaw_err", float("nan")):.3f}  '
+                          f'yaw_drift={_metrics.get("sim2sim/yaw_drift_passive", float("nan")):.3f}  '
+                          f'disp_y={_metrics.get("sim2sim/displacement_err_y", float("nan")):.2f}  '
                           f'({_elapsed:.0f}s)')
             except Exception as _e:
                 print(f'[sim2sim] eval failed at iter {it}: {_e}')

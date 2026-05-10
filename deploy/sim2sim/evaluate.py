@@ -218,6 +218,8 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
 
     vx_errors    = []
     vx_body_samples = []    # (elapsed_sec, vx_body) for trajectory-level metrics
+    vy_body_samples = []    # (elapsed_sec, vy_body) — same purpose for lateral cmds
+    yaw_rate_samples = []   # (elapsed_sec, yaw_rate) — passive yaw drift detection
     yaw_errors   = []
     vy_abs       = []
     roll_rms_acc = []
@@ -306,6 +308,8 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
             vy_abs.append(abs(vy_body))
             t_now   = step * sim_dt
             vx_body_samples.append((t_now, vx_body))
+            vy_body_samples.append((t_now, vy_body))
+            yaw_rate_samples.append((t_now, float(data.qvel[5])))
             base_z_samples.append((t_now, float(data.qpos[2])))
             yaw_samples.append((t_now, float(yaw_world)))
             # Contact forces: iterate contact list (cfrc_ext isn't auto-populated
@@ -363,6 +367,23 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
                         if (cmd_yaw == 0.0 and elapsed > 0) else float('nan'))
     vx_bias_body  = float(np.mean([v - cmd_vx for v in steady]))        if steady else float('nan')
     vx_err_steady = float(np.mean([abs(v - cmd_vx) for v in steady]))   if steady else float('nan')
+
+    # Lateral (vy) trajectory metrics — same idea as vx_bias_body / displacement_err.
+    # vy_bias_body detects "gait-sway-impersonating-strafe" failure mode where
+    # body_vy oscillates ±0.3 around 0 but per-step |err| looks small. Signed mean
+    # exposes whether net lateral motion matches cmd.
+    steady_vy = [v for (t, v) in vy_body_samples if t >= STARTUP]
+    vy_bias_body  = float(np.mean([v - cmd_vy for v in steady_vy]))      if steady_vy else float('nan')
+    vy_err_steady = float(np.mean([abs(v - cmd_vy) for v in steady_vy])) if steady_vy else float('nan')
+    displacement_err_y = (abs(y_final - cmd_vy * elapsed)
+                          if (cmd_yaw == 0.0 and elapsed > 0) else float('nan'))
+
+    # Passive yaw drift — net yaw_rate when cmd_yaw=0. Detects "spinning while
+    # strafing" pathology (body_vy may track but body keeps rotating). Big mean
+    # |yaw_rate| with cmd_yaw=0 = bad.
+    steady_yaw_rate = [v for (t, v) in yaw_rate_samples if t >= STARTUP]
+    yaw_rate_bias = float(np.mean([v - cmd_yaw for v in steady_yaw_rate])) if steady_yaw_rate else float('nan')
+    yaw_drift_passive = (abs(yaw_rate_bias) if cmd_yaw == 0.0 else float('nan'))
 
     # ── Gait-quality metrics (all over steady-state window t >= STARTUP) ────
     # com_z_rms: body vertical oscillation — big = big steps / bouncy gait
@@ -434,6 +455,10 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
         'vx_err_steady':  vx_err_steady,
         'vx_bias_body':   vx_bias_body,
         'displacement_err': float(displacement_err),
+        'vy_bias_body':   vy_bias_body,
+        'vy_err_steady':  vy_err_steady,
+        'displacement_err_y': float(displacement_err_y),
+        'yaw_drift_passive': float(yaw_drift_passive),
         'yaw_error_mean': float(np.mean(yaw_errors)) if yaw_errors else float('nan'),
         'vy_abs_mean':    float(np.mean(vy_abs))     if vy_abs     else float('nan'),
         'roll_rms':       float(np.sqrt(np.mean(roll_rms_acc)))  if roll_rms_acc  else float('nan'),
@@ -453,16 +478,18 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
 
 # ── evaluation loop ───────────────────────────────────────────────────────────
 
-def evaluate(cfg, runs, duration, frictions, vx_list, yaw_list, out_path):
-    conditions = list(itertools.product(frictions, vx_list, yaw_list))
+def evaluate(cfg, runs, duration, frictions, vx_list, yaw_list, out_path, vy_list=(0.0,)):
+    conditions = list(itertools.product(frictions, vx_list, vy_list, yaw_list))
     total = len(conditions) * runs
     print(f"Evaluating {len(conditions)} conditions × {runs} runs = {total} episodes")
     print(f"Policy: {cfg['policy_path']}\n")
 
     fieldnames = [
-        'friction', 'cmd_vx', 'cmd_yaw', 'run',
+        'friction', 'cmd_vx', 'cmd_vy', 'cmd_yaw', 'run',
         'survived', 'survive_time', 'x_final', 'y_final',
         'vx_error_mean', 'vx_err_steady', 'vx_bias_body', 'displacement_err',
+        'vy_bias_body', 'vy_err_steady', 'displacement_err_y',
+        'yaw_drift_passive',
         'yaw_error_mean', 'vy_abs_mean', 'roll_rms', 'pitch_rms', 'cot',
         'com_z_rms', 'yaw_osc_rms', 'measured_freq', 'duty_factor',
         'landing_vz_peak', 'stride_length', 'stride_asymm',
@@ -475,28 +502,31 @@ def evaluate(cfg, runs, duration, frictions, vx_list, yaw_list, out_path):
         writer.writeheader()
 
         done = 0
-        for friction, cmd_vx, cmd_yaw in conditions:
+        for friction, cmd_vx, cmd_vy, cmd_yaw in conditions:
             results = []
             for run_i in range(runs):
-                metrics = run_episode(cfg, cmd_vx, cmd_yaw, friction, duration, seed=run_i)
-                row = {'friction': friction, 'cmd_vx': cmd_vx, 'cmd_yaw': cmd_yaw,
-                       'run': run_i, **metrics}
+                metrics = run_episode(cfg, cmd_vx, cmd_yaw, friction, duration,
+                                      seed=run_i, cmd_vy=cmd_vy)
+                row = {'friction': friction, 'cmd_vx': cmd_vx, 'cmd_vy': cmd_vy,
+                       'cmd_yaw': cmd_yaw, 'run': run_i, **metrics}
                 writer.writerow(row)
                 f.flush()
                 results.append(metrics)
                 done += 1
 
-            surv_rate = np.mean([r['survived'] for r in results])
-            vx_err    = np.nanmean([r['vx_error_mean'] for r in results])
-            vy_drift  = np.nanmean([r['vy_abs_mean'] for r in results])
-            roll      = np.nanmean([r['roll_rms'] for r in results])
-            mean_pkr  = np.mean([r['peak_tau_ratio'] for r in results])
-            max_pkr   = np.max ([r['peak_tau_ratio'] for r in results])
-            print(f"friction={friction:.1f} vx={cmd_vx:+.1f} yaw={cmd_yaw:+.1f} | "
-                  f"survival={surv_rate*100:.0f}%  vx_err={vx_err:.3f}  "
-                  f"vy_drift={vy_drift:.3f}  roll_rms={np.degrees(roll):.1f}deg  "
-                  f"τpeak/eff={mean_pkr:.2f}×(max {max_pkr:.2f}×)  "
-                  f"[{done}/{total}]")
+            surv_rate   = np.mean([r['survived'] for r in results])
+            vx_err      = np.nanmean([r['vx_error_mean'] for r in results])
+            vx_disp     = np.nanmean([r['displacement_err'] for r in results])
+            vy_bias     = np.nanmean([r['vy_bias_body'] for r in results])
+            vy_disp_y   = np.nanmean([r['displacement_err_y'] for r in results])
+            yaw_drift_p = np.nanmean([r['yaw_drift_passive'] for r in results])
+            mean_pkr    = np.mean([r['peak_tau_ratio'] for r in results])
+            print(f"f={friction:.1f} vx={cmd_vx:+.1f} vy={cmd_vy:+.1f} yaw={cmd_yaw:+.1f} | "
+                  f"surv={surv_rate*100:3.0f}%  "
+                  f"vx_err={vx_err:.3f} disp_x={vx_disp:.3f}  "
+                  f"vy_bias={vy_bias:+.3f} disp_y={vy_disp_y:.3f}  "
+                  f"yaw_drift={yaw_drift_p:.3f}  "
+                  f"τ/eff={mean_pkr:.2f}× [{done}/{total}]")
 
     print(f"\nResults saved to: {out_path}")
     return out_path
@@ -718,6 +748,7 @@ def make_plots(csv_path):
 def quick_eval(onnx_path, sim_cfg,
                frictions=(1.0, 1.5),
                vx_list=(-0.5, 0.0, 0.5),
+               vy_list=(-0.3, 0.3),
                yaw_list=(0.0, 0.5, -0.5),
                runs=10,
                duration=15.0):
@@ -732,7 +763,12 @@ def quick_eval(onnx_path, sim_cfg,
         sim2sim/vx_bias_fwd/bwd      — signed body-frame bias (+=slow, -=fast), steady state
         sim2sim/displacement_err_fwd/bwd — |x_final - cmd_vx * duration|, trajectory-level
         sim2sim/yaw_err              — mean yaw rate error, non-zero yaw commands
-        sim2sim/vy_drift             — mean lateral drift
+        sim2sim/vy_bias_strafe       — signed mean (body_vy - cmd_vy) on cmd_vy != 0 runs;
+                                       big magnitude = "gait sway impersonating strafe"
+        sim2sim/displacement_err_y   — |y_final - cmd_vy * duration|, real lateral tracking
+        sim2sim/yaw_drift_passive    — |mean yaw_rate| when cmd_yaw=0, includes strafe runs;
+                                       big = robot spinning while moving (sim2sim findings)
+        sim2sim/vy_drift             — mean lateral drift (legacy: |vy| on cmd_yaw=0 fwd-only)
         sim2sim/pitch_rms_fwd/bwd    — mean pitch RMS forward/backward
         sim2sim/roll_rms             — mean roll RMS
 
@@ -754,7 +790,8 @@ def quick_eval(onnx_path, sim_cfg,
     for friction, cmd_vx in itertools.product(frictions, vx_list):
         for run_i in range(runs):
             m = run_episode(cfg, cmd_vx, 0.0, friction, duration, seed=run_i)
-            rows.append({'friction': friction, 'cmd_vx': cmd_vx, 'cmd_yaw': 0.0, **m})
+            rows.append({'friction': friction, 'cmd_vx': cmd_vx, 'cmd_vy': 0.0,
+                         'cmd_yaw': 0.0, **m})
 
     # yaw sweep (vx=0, fr=1.0 only): covers yaw tracking
     for cmd_yaw in yaw_list:
@@ -762,7 +799,15 @@ def quick_eval(onnx_path, sim_cfg,
             continue
         for run_i in range(runs):
             m = run_episode(cfg, 0.0, cmd_yaw, 1.0, duration, seed=run_i)
-            rows.append({'friction': 1.0, 'cmd_vx': 0.0, 'cmd_yaw': cmd_yaw, **m})
+            rows.append({'friction': 1.0, 'cmd_vx': 0.0, 'cmd_vy': 0.0, 'cmd_yaw': cmd_yaw, **m})
+
+    # vy sweep (vx=0, cmd_yaw=0, fr=1.0 only): covers strafe + passive yaw drift
+    for cmd_vy in vy_list:
+        if cmd_vy == 0.0:
+            continue
+        for run_i in range(runs):
+            m = run_episode(cfg, 0.0, 0.0, 1.0, duration, seed=run_i, cmd_vy=cmd_vy)
+            rows.append({'friction': 1.0, 'cmd_vx': 0.0, 'cmd_vy': cmd_vy, 'cmd_yaw': 0.0, **m})
 
     if not rows:
         return {}
@@ -813,6 +858,26 @@ def quick_eval(onnx_path, sim_cfg,
     yaw_rows = [r for r in rows if r['cmd_yaw'] != 0.0 and r['survived']]
     metrics['sim2sim/yaw_err'] = float(np.nanmean([r['yaw_error_mean'] for r in yaw_rows])) if yaw_rows else float('nan')
 
+    # Strafe tracking + passive yaw drift (the metrics that exposed the
+    # gait-sway-impersonating-strafe pathology in walk_v30 sim2sim eval).
+    strafe_rows = [r for r in rows if r.get('cmd_vy', 0.0) != 0.0 and r['survived']]
+    if strafe_rows:
+        metrics['sim2sim/vy_bias_strafe']     = float(np.nanmean([abs(r['vy_bias_body'])   for r in strafe_rows]))
+        metrics['sim2sim/displacement_err_y'] = float(np.nanmean([r['displacement_err_y']   for r in strafe_rows]))
+    else:
+        metrics['sim2sim/vy_bias_strafe']     = float('nan')
+        metrics['sim2sim/displacement_err_y'] = float('nan')
+
+    # Passive yaw drift on cmd_yaw=0 runs (covers fwd, bwd, strafe). Big magnitude
+    # = robot rotates without being asked to — the dominant deployment failure.
+    passive_yaw_rows = [r for r in rows if r['cmd_yaw'] == 0.0 and r['survived']]
+    if passive_yaw_rows:
+        metrics['sim2sim/yaw_drift_passive'] = float(np.nanmean([r['yaw_drift_passive']
+                                                                  for r in passive_yaw_rows
+                                                                  if not math.isnan(r['yaw_drift_passive'])]))
+    else:
+        metrics['sim2sim/yaw_drift_passive'] = float('nan')
+
     return metrics
 
 
@@ -827,6 +892,9 @@ def main():
     parser.add_argument('--duration', type=float, default=10.0, help='Seconds per episode')
     parser.add_argument('--out',      default=None, help='Output CSV path')
     parser.add_argument('--no-plots', action='store_true', help='Skip matplotlib plots')
+    parser.add_argument('--grid', default='vx', choices=['vx', 'vy', 'yaw', 'omni'],
+                        help='Cmd grid: vx (default, 7 vx × 0 yaw), vy (3 vy), '
+                             'yaw (5 yaw), omni (4×3×3 = 36 combos)')
     parser.add_argument('--report-only', default=None, metavar='CSV',
                         help='Skip evaluation; print report for existing CSV')
     args = parser.parse_args()
@@ -860,10 +928,20 @@ def main():
         args.out = os.path.join(policy_dir, 'eval.csv')
 
     frictions = [0.5, 1.0, 1.5]
-    vx_list   = [-0.7, -0.5, -0.3, 0.0, 0.3, 0.5, 0.7]
-    yaw_list  = [0.0]
+    if args.grid == 'vx':
+        vx_list, vy_list, yaw_list = [-0.7, -0.5, -0.3, 0.0, 0.3, 0.5, 0.7], [0.0], [0.0]
+    elif args.grid == 'vy':
+        vx_list, vy_list, yaw_list = [0.0], [-0.3, 0.0, 0.3], [0.0]
+    elif args.grid == 'yaw':
+        vx_list, vy_list, yaw_list = [0.0], [0.0], [-1.0, -0.5, 0.0, 0.5, 1.0]
+    elif args.grid == 'omni':
+        # Compact omnidirectional grid covering vx/vy/yaw individually + a few combos.
+        vx_list, vy_list, yaw_list = [-0.3, 0.0, 0.3, 0.5], [-0.3, 0.0, 0.3], [-0.5, 0.0, 0.5]
+    else:
+        parser.error(f"Unknown --grid {args.grid!r}; pick from vx|vy|yaw|omni")
 
-    csv_path = evaluate(cfg, args.runs, args.duration, frictions, vx_list, yaw_list, args.out)
+    csv_path = evaluate(cfg, args.runs, args.duration, frictions, vx_list, yaw_list,
+                        args.out, vy_list=vy_list)
 
     print_report(csv_path)
     if not args.no_plots:
