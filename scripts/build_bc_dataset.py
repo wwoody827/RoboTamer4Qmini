@@ -129,6 +129,15 @@ def main():
                    help='|cmd[i]| above this → axis is "active/commanded"')
     p.add_argument('--deadzone', type=float, default=0.02,
                    help='Relabeled cmd within deadzone is snapped to 0')
+    p.add_argument('--min_tracking_eff', type=float, default=0.0,
+                   help='Per-commanded-axis tracking efficiency floor: '
+                        'realized[i] / cmd[i] >= floor (sign-checked). 0=off. '
+                        'E.g. 0.5 keeps only traces that actually moved at '
+                        'least 50%% of commanded velocity on each active axis.')
+    p.add_argument('--max_uncmd_drift_yaw', type=float, default=None,
+                   help='Stricter than drift_thresh_yaw: drop trace if '
+                        'uncommanded yaw drift exceeds this (e.g. 0.10 for '
+                        'strafe-priority). Defaults to drift_thresh_yaw.')
     args = p.parse_args()
 
     in_root = Path(args.input).resolve()
@@ -176,6 +185,28 @@ def main():
         counts[cls] += 1
         if cls not in include:
             continue
+
+        # Optional secondary filters (after class-based include).
+        cmd_orig_arr = d['cmd_const'].astype(np.float32)
+        # 1) tracking efficiency on commanded axes
+        if args.min_tracking_eff > 0.0 and cls != 'failure':
+            ok = True
+            for i in range(3):
+                if abs(cmd_orig_arr[i]) > args.cmd_active_thresh:
+                    eff = mean_realized[i] / cmd_orig_arr[i]
+                    if eff < args.min_tracking_eff:
+                        ok = False
+                        break
+            if not ok:
+                counts.setdefault('low_eff', 0)
+                counts['low_eff'] += 1
+                continue
+        # 2) tighter yaw drift on uncommanded yaw axis
+        if args.max_uncmd_drift_yaw is not None and cls != 'failure':
+            if abs(cmd_orig_arr[2]) < args.cmd_active_thresh and drift[2] > args.max_uncmd_drift_yaw:
+                counts.setdefault('high_yaw_drift', 0)
+                counts['high_yaw_drift'] += 1
+                continue
 
         T = int(d['joint_pos'].shape[0])
         cmd_orig = d['cmd_const'].astype(np.float32)
