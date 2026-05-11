@@ -139,8 +139,16 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
         ext_clock.reset()
     lp_target = ref_joint.copy()
     current_joint_act = ref_joint.copy()
-    obs_history = deque(maxlen=obs_hist)
-    for _ in range(obs_hist):
+    # Framestack: training uses obs_history × obs_skip — buffer holds enough
+    # raw frames so we can index back by `i * obs_skip` for i in [0, obs_hist).
+    # The earlier `maxlen=obs_hist` was WRONG — it ignored obs_skip and fed
+    # the policy 5 consecutive frames (~75 ms window) instead of the trained
+    # 5 frames × skip 2 (~150 ms window). The bug silently inflated all
+    # survival numbers because the policy saw fresher obs than training.
+    obs_skip = int(cfg.get('obs_skip', 1) or 1)
+    _buf_len = (obs_hist - 1) * obs_skip + 1
+    obs_history = deque(maxlen=_buf_len)
+    for _ in range(_buf_len):
         obs_history.append(np.zeros(obs_dim, dtype=np.float32))
 
     def _imu_state():
@@ -311,7 +319,9 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
             else:
                 obs_now = get_obs()
             obs_history.append(obs_now)
-            obs_stacked = np.concatenate(list(obs_history))[np.newaxis, :]
+            _buf = list(obs_history)
+            _idx = [i * obs_skip for i in range(obs_hist)]
+            obs_stacked = np.concatenate([_buf[i] for i in _idx])[np.newaxis, :]
             net_out = session.run(None, {input_name: obs_stacked})[0][0]
             scaled  = scale_transform(net_out, act_low, act_high)
 

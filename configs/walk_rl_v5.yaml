@@ -1,0 +1,40 @@
+# walk_rl_v5 — G1-style posture rewards to escape 0.38 m local optimum.
+#
+# v3 (base_heit weight 1→3) and v4 (same + wider delay DR) both converged
+# to com_z ~ 0.378 m, basically same as walk_v34 baseline. The reason:
+# our `base_heit_rew = exp(-70 × (z-target)²)` is a POSITIVE bell curve
+# that saturates near the target — at 5 cm off it still pays ~84 % of max,
+# so the optimizer sees "this state is fine" and the bent-knee gait
+# (which saves on actuator regs) wins the trade-off.
+#
+# Unitree G1 (unitree_rl_lab) uses `-w × (z - target)² with w=10`, an
+# unbounded quadratic penalty. They also add `flat_orient_l2: -5 × ||g_xy||²`
+# (penalize tilt directly via projected gravity). v5 adopts both.
+#
+# vs walk_rl (baseline) + foot_stand:
+#   • base_heit:        1.0 → 0.0       (turn off the bell-curve version)
+#   • base_height_l2:   NEW −10.0       (strict G1-style L2 penalty)
+#   • flat_orient_l2:   NEW −5.0        (strict L2 on body tilt)
+#   • foot_stand:       NEW 1.0         (carry-over from v2: standstill grounding)
+#   • delay ranges:     [1, 50] / [1, 60] / [1, 60]  (carry-over from v4)
+#
+# Why both base_height and flat_orient: the policy can game just height
+# by tilting (still get good base_heit if z is at target but body leaning).
+# flat_orient_l2 prevents that. Same logic as G1's recipe.
+#
+# Training: fresh 5000 iter. We expect the policy to climb com_z toward
+# 0.43-0.45 m within ~3000 iter. If still stuck around 0.38, increase the
+# L2 weights to -20 and -10 respectively.
+
+_base: walk_rl.yaml
+
+reward:
+  base_heit:       0.0     # old bell-curve OFF (was 1.0)
+  base_height_l2: -10.0    # NEW: strict L2 penalty, Unitree G1 weight
+  flat_orient_l2: -5.0     # NEW: strict L2 on projected_gravity XY
+  foot_stand:      1.0
+
+domain_rand:
+  delay_joint_ranges: [1, 50]
+  delay_angle_ranges: [1, 60]
+  delay_rate_ranges:  [1, 60]

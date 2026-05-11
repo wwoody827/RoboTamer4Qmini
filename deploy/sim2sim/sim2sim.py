@@ -582,6 +582,24 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, cmd_freq=None, duration=Non
     for _ in range(_buf_len):
         obs_history.append(np.zeros(obs_dim, dtype=np.float32))
 
+    # Obs-delay DR: training delays per-quantity obs by 10-40 / 20-50 PHYSICS
+    # steps. Without this here, the policy got 0 ms freshness (below training
+    # distribution) and the obs/action timing was off → walk_v34 fell at 5.6 s
+    # in stand-cmd video recordings. Buffers pushed per physics step inside
+    # _physics_step() (below).
+    rng = np.random.default_rng(0)
+    _dj = cfg.get('delay_joint_ranges', [10, 40])
+    _da = cfg.get('delay_angle_ranges', [20, 50])
+    _dr = cfg.get('delay_rate_ranges',  [20, 50])
+    delay_jnt   = int(rng.integers(_dj[0], _dj[1] + 1))
+    delay_angle = int(rng.integers(_da[0], _da[1] + 1))
+    delay_rate  = int(rng.integers(_dr[0], _dr[1] + 1))
+    delay_max   = max(delay_jnt, delay_angle, delay_rate, 1)
+    _q_buf   = deque([ref_joint.copy() for _ in range(delay_max + 1)], maxlen=delay_max + 1)
+    _dq_buf  = deque([np.zeros(NUM_JOINTS, dtype=np.float32) for _ in range(delay_max + 1)], maxlen=delay_max + 1)
+    _eul_buf = deque([np.zeros(2, dtype=np.float32) for _ in range(delay_max + 1)], maxlen=delay_max + 1)
+    _av_buf  = deque([np.zeros(3, dtype=np.float32) for _ in range(delay_max + 1)], maxlen=delay_max + 1)
+
     def _get_imu_state():
         """Return (quat [w,x,y,z], base_ang_vel body-frame) from MuJoCo state."""
         if imu_body_id >= 0:
@@ -593,108 +611,65 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, cmd_freq=None, duration=Non
         base_ang_vel = quat_rotate_inverse(quat, world_angvel)
         return quat, base_ang_vel
 
-    def get_obs():
-        """Build BIRL observation vector.
-        44-dim (current):  [cmd×3, roll, pitch, ang_vel×3, jp×10, jv×10, jerr×10, phase×4, freq×2]
-        47-dim (teacher):  same + base_lin_vel×3 (privileged — body-frame linear velocity)
-        """
-        q  = data.qpos[QPOS_START:QPOS_START + NUM_JOINTS]
-        dq = data.qvel[QVEL_START:QVEL_START + NUM_JOINTS]
+    def _push_obs_history():
+        """Push current rigid-body state into per-quantity delay buffers.
+        Call once per physics step (matches training step_torques cadence)."""
+        q  = data.qpos[QPOS_START:QPOS_START + NUM_JOINTS].astype(np.float32).copy()
+        dq = data.qvel[QVEL_START:QVEL_START + NUM_JOINTS].astype(np.float32).copy()
         quat, base_ang_vel = _get_imu_state()
-        euler        = quat_to_euler_xyz(quat)
-        base_euler   = euler[:2]
+        base_euler = quat_to_euler_xyz(quat)[:2].astype(np.float32).copy()
+        _q_buf.append(q); _dq_buf.append(dq); _eul_buf.append(base_euler)
+        _av_buf.append(base_ang_vel.astype(np.float32).copy())
+
+    def _delayed():
+        return (_q_buf[-1 - delay_jnt], _dq_buf[-1 - delay_jnt],
+                _eul_buf[-1 - delay_angle], _av_buf[-1 - delay_rate])
+
+    def get_obs():
+        """Build BIRL observation vector. Reads delayed q/dq/euler/ang_vel."""
+        q, dq, base_euler, base_ang_vel = _delayed()
         joint_pos_rel = q - ref_joint
         joint_vel_sc  = dq * 0.1
         joint_pos_err = current_joint_act - q
         pm_phase_val  = np.concatenate([np.sin(pm.phase), np.cos(pm.phase)]) * static_flag
         pm_f_val      = (pm.frequency * 0.3 - 1.0) * static_flag
         obs_parts = [
-            commands,           # 3
-            base_euler,         # 2: roll, pitch
-            base_ang_vel * 0.5, # 3: ang vel
-            joint_pos_rel,      # 10
-            joint_vel_sc,       # 10
-            joint_pos_err,      # 10
-            pm_phase_val,       # 4
-            pm_f_val,           # 2
+            commands, base_euler, base_ang_vel * 0.5,
+            joint_pos_rel, joint_vel_sc, joint_pos_err,
+            pm_phase_val, pm_f_val,
         ]
         if obs_dim == 47:
-            # Teacher: append body-frame linear velocity (privileged obs)
+            # Teacher: append CURRENT body-frame linear velocity (privileged)
+            quat_now, _ = _get_imu_state()
             world_lin_vel = data.qvel[:3]
-            base_lin_vel  = quat_rotate_inverse(quat, world_lin_vel)
-            obs_parts.append(base_lin_vel.astype(np.float32))  # 3
-        obs = np.concatenate(obs_parts).astype(np.float32)
-        obs = np.clip(obs, -3.0, 3.0)
-        return obs
+            base_lin_vel  = quat_rotate_inverse(quat_now, world_lin_vel)
+            obs_parts.append(base_lin_vel.astype(np.float32))
+        return np.clip(np.concatenate(obs_parts).astype(np.float32), -3.0, 3.0)
 
     def get_obs_mirl():
-        """Build observation vector matching MIRLTask.pure_observation() (64-dim).
-
-        Layout:
-          [0-7]   8 command slots: [vx, vy, yaw, 0, 0, 0, 0, 0]
-          [8-9]   roll, pitch
-          [10-12] angular velocity × 0.5
-          [13-22] joint_pos − ref_joint_pos
-          [23-32] joint_vel × 0.1
-          [33-42] joint_act − joint_pos  (tracking error)
-          [43-63] ref slots + phase_progress (zeros — no reference clip in sim2sim yet)
-        """
-        q  = data.qpos[QPOS_START:QPOS_START + NUM_JOINTS]
-        dq = data.qvel[QVEL_START:QVEL_START + NUM_JOINTS]
-        quat, base_ang_vel = _get_imu_state()
-        euler         = quat_to_euler_xyz(quat)
-        base_euler    = euler[:2]
-        joint_pos_rel = q - ref_joint
-        joint_vel_sc  = dq * 0.1
-        joint_pos_err = current_joint_act - q
-        commands_8    = np.array([commands[0], commands[1], commands[2],
-                                   0., 0., 0., 0., 0.], dtype=np.float32)
+        """MIRL obs (64-dim) with delayed proprio."""
+        q, dq, base_euler, base_ang_vel = _delayed()
+        commands_8 = np.array([commands[0], commands[1], commands[2],
+                               0., 0., 0., 0., 0.], dtype=np.float32)
         obs = np.concatenate([
-            commands_8,          # 8
-            base_euler,          # 2
-            base_ang_vel * 0.5,  # 3
-            joint_pos_rel,       # 10
-            joint_vel_sc,        # 10
-            joint_pos_err,       # 10
-            np.zeros(21, dtype=np.float32),  # ref slots + phase_progress
+            commands_8, base_euler, base_ang_vel * 0.5,
+            q - ref_joint, dq * 0.1, current_joint_act - q,
+            np.zeros(21, dtype=np.float32),
         ]).astype(np.float32)
-        obs = np.clip(obs, -3.0, 3.0)
-        return obs
+        return np.clip(obs, -3.0, 3.0)
 
     def get_obs_noclock():
-        """walk_noclock obs: 38-dim, 6 slots, no phase, no ref."""
-        q  = data.qpos[QPOS_START:QPOS_START + NUM_JOINTS]
-        dq = data.qvel[QVEL_START:QVEL_START + NUM_JOINTS]
-        quat, base_ang_vel = _get_imu_state()
-        base_euler = quat_to_euler_xyz(quat)[:2]
+        """walk_noclock obs: 38-dim, delayed proprio."""
+        q, dq, base_euler, base_ang_vel = _delayed()
         obs = np.concatenate([
-            commands,                # 3
-            base_euler,              # 2
-            base_ang_vel * 0.5,      # 3
-            q - ref_joint,           # 10
-            dq * 0.1,                # 10
-            current_joint_act - q,   # 10
+            commands, base_euler, base_ang_vel * 0.5,
+            q - ref_joint, dq * 0.1, current_joint_act - q,
         ]).astype(np.float32)
         return np.clip(obs, -3.0, 3.0)
 
     def get_obs_bdx():
-        """Build BD_X-style observation vector (phase.mode=input, 43-dim).
-
-        Layout matches bdx.yaml obs_slots:
-          [0-2]   commands_3: vx, vy, yaw
-          [3-4]   base_euler: roll, pitch
-          [5-7]   base_ang_vel × 0.5
-          [8-17]  joint_pos − ref_joint_pos
-          [18-27] joint_vel × 0.1
-          [28-37] joint_act − joint_pos (tracking error)
-          [38-41] phase_clock: sin/cos of external phase × static_flag
-          [42]    phase_freq_cmd: normalized commanded frequency × static_flag
-        """
-        q  = data.qpos[QPOS_START:QPOS_START + NUM_JOINTS]
-        dq = data.qvel[QVEL_START:QVEL_START + NUM_JOINTS]
-        quat, base_ang_vel = _get_imu_state()
-        euler         = quat_to_euler_xyz(quat)
-        base_euler    = euler[:2]
+        """BD_X obs (43-dim) with delayed proprio + ext clock."""
+        q, dq, base_euler, base_ang_vel = _delayed()
         joint_pos_rel = q - ref_joint
         joint_vel_sc  = dq * 0.1
         joint_pos_err = current_joint_act - q
@@ -763,6 +738,11 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, cmd_freq=None, duration=Non
                 mujoco.mj_forward(model, data)
             vx, vy, yaw = cin.get()
             commands[0] = vx; commands[1] = vy; commands[2] = yaw
+
+        # Push current state into delay buffers at PHYSICS rate (matches
+        # training's step_torques cadence). The obs builders read delayed
+        # values via _delayed().
+        _push_obs_history()
 
         if step % decimation == 0:
             if not stand_only:

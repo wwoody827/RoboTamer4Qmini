@@ -1,0 +1,36 @@
+# walk_rl_v6 — v5 with the positive base_heit bell RESTORED alongside L2.
+#
+# v5 turned off the positive `base_heit` bell and added Unitree-style
+# negative L2 penalties on z and projected_gravity. com_z went DOWN to
+# 0.32 m — opposite of intended. Diagnosis: the positive bell was a
+# weak-but-present attractor pulling toward 0.45 m. Removing it left
+# only the L2 penalty (-10 weight, ~0.17/step at z=0.32) which is small
+# relative to other rewards (fwd_vel +2, balance +1.5, etc.). Policy
+# settled wherever was convenient.
+#
+# v6 keeps BOTH:
+#   • base_heit: 1.0      — positive bell, local attractor near target
+#   • base_height_l2: -10 — strict L2 penalty, unbounded tail far from target
+#   • flat_orient_l2: -5  — strict tilt penalty (already in v5)
+#   • foot_stand: 1.0     — standstill grounding (from v2)
+#   • wider delay DR [1, 50] / [1, 60] / [1, 60]  (from v4)
+#
+# The bell handles the "you're close, stay close" regime; the L2 handles
+# "you've wandered too far, come back" regime. Together they should
+# create a much stronger upward pull than either alone.
+#
+# Training: fresh 5000 iter from scratch. Watching com_z @ stand to climb
+# past 0.40 m by iter 2000 — if not, weights still too weak.
+
+_base: walk_rl.yaml
+
+reward:
+  base_heit:       1.0     # RESTORED (was 0.0 in v5)
+  base_height_l2: -10.0    # kept from v5
+  flat_orient_l2: -5.0     # kept from v5
+  foot_stand:      1.0
+
+domain_rand:
+  delay_joint_ranges: [1, 50]
+  delay_angle_ranges: [1, 60]
+  delay_rate_ranges:  [1, 60]

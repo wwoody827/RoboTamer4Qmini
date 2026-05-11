@@ -1,0 +1,30 @@
+# walk_rl_v3 — walk_v34 baseline + foot_stand + stronger base_heit weight.
+#
+# Built after walk_rl_v2 (walk_v34 + foot_stand, --init_only resume) was
+# confirmed as the best deploy candidate (perfect 48/48s sim2sim) but still
+# walks ~5-6 cm below the 0.45 m target. walk_v34 was -7~-9 cm, v2 already
+# improved to -5~-6 cm (likely a side-effect of init_only resetting the
+# optimizer and finding a more upright local optimum). To close the
+# remaining gap, this run bumps `reward.base_heit` 1.0 → 3.0.
+#
+# Why weight not slope: at z=0.40 m the exp(-70*(z-0.45)^2) reward is 0.84,
+# i.e. only 16 % loss. Multiplied by walk_rl's weight 1.0 → 0.16 net penalty.
+# That's smaller than the regulator savings (act_smo, joint_tor, jnt_vel)
+# that a bent-knee gait earns. weight 3.0 → 0.48 net penalty per 5 cm of
+# drop, comfortably outweighing the regulator pull.
+#
+# Training: fresh from scratch (no --resume) for 5000 iters. We expect:
+#   • base_heit reward contribution to climb significantly higher than
+#     walk_rl's converged ~0.015 because both weight and z-position are
+#     bigger.
+#   • Possibly slower convergence of tracking — strong posture rewards
+#     can compete with cmd-tracking early. If sim2sim survival stays low
+#     past iter 1500, we'll need to back off weight to 2.0.
+
+_base: walk_rl.yaml
+
+reward:
+  foot_stand: 1.0       # carry-over from v2 — positive incentive to keep
+                        # feet planted at standstill (||cmd||<0.15).
+  base_heit: 3.0        # was 1.0 — triples the pull toward 0.45 m. The
+                        # main change vs walk_rl_v2.

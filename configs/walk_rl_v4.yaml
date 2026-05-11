@@ -1,0 +1,49 @@
+# walk_rl_v4 — walk_rl_v3 + wider obs-delay DR.
+#
+# Why this run:
+#
+# Tonight we found three sim2sim bugs (framestack-skip ignored, no obs-delay
+# buffer in evaluate.py, no obs-delay buffer in sim2sim.py). After fixing
+# all three, walk_v34 was confirmed robust when fed 10-40 ms obs delay
+# (matching training DR distribution), but **fell at t=5.6 s when fed 0 ms
+# delay** — the policy is brittle to delay values BELOW its training range.
+#
+# Real robot will have variable delay depending on sensor read time, comm
+# latency, kernel scheduling jitter. Could easily span 0 - 50+ ms. Training
+# only on `[10, 40] / [20, 50]` ms leaves the policy without coverage at
+# the low end, and possibly without enough robustness at the high end.
+#
+# This run widens the training DR ranges so the policy sees the full
+# realistic spectrum during training:
+#   • delay_joint_ranges: [10, 40] → [0, 50]
+#   • delay_angle_ranges: [20, 50] → [0, 60]
+#   • delay_rate_ranges:  [20, 50] → [0, 60]
+#
+# Per-env delay still sampled once at reset (matches training semantics);
+# wider uniform distribution means each batch sees a mix of "low delay"
+# and "high delay" envs, forcing the policy to be agnostic to exact value.
+#
+# Other changes vs walk_rl (= walk_v34) — carried over from v3:
+#   • reward.foot_stand: 1.0   (positive incentive at standstill)
+#   • reward.base_heit:  3.0   (was 1.0 — pull harder toward 0.45 m, fix
+#                                the systemic ~6 cm low walking)
+#
+# Training from scratch, 5000 iters. Watching:
+#   • Sim2sim survival at delay = 0 ms (real-robot worst case): should
+#     improve dramatically from walk_v34's 5.6 s.
+#   • Sim2sim survival at delay = 25 ms (training median): should match
+#     walk_v34's near-perfect.
+#   • com_z_mean at all cmds: should be 0.42-0.45 m (was 0.38).
+
+_base: walk_rl.yaml
+
+reward:
+  foot_stand: 1.0
+  base_heit:  3.0
+
+domain_rand:
+  # DelayDeque is 1-indexed; delay=1 means "1 physics step ago = 1 ms".
+  # That's effectively "no delay" for our purposes (1 ms << control bandwidth).
+  delay_joint_ranges: [1, 50]      # was [10, 40]; now spans 1-50 ms
+  delay_angle_ranges: [1, 60]      # was [20, 50]; spans 1-60 ms
+  delay_rate_ranges:  [1, 60]      # was [20, 50]; spans 1-60 ms

@@ -967,6 +967,19 @@ class BIRLTask(NullTask):
         _bh_target = float(getattr(self.cfg.reward, 'base_heit_target', 0.45) or 0.45)
         base_heit_rew = torch.exp(-_bh_slope * (self.env.base_pos[:, [2]] - _bh_target) ** 2)
 
+        # Unitree G1 / legged_gym style: strict L2 penalty on height deviation.
+        # Unlike base_heit_rew (positive bell, saturates), this has unbounded
+        # quadratic tail → policy keeps pulling toward target. Used by
+        # walk_rl_v5+ to escape the 0.38 m local optimum.
+        base_height_l2 = -((self.env.base_pos[:, [2]] - _bh_target) ** 2)   # ≤ 0
+
+        # Unitree G1 style: strict L2 penalty on projected-gravity XY (i.e.
+        # body tilt). Equivalent to penalizing roll² + pitch², but uses
+        # projected gravity which is what the IMU actually reads. No saturation.
+        flat_orient_l2 = -torch.sum(
+            self.env.projected_gravity[:, :2] ** 2, dim=-1, keepdim=True
+        )   # ≤ 0
+
         balance_rew = 0.5 * (base_heit_rew * torch.exp(-torch.clip(5. / lin_vel_x_norm, min=2, max=8.) * torch.norm(self.env.base_euler[:, :2], dim=-1, keepdim=True)) + 1.)
 
         # Linear cmd-tracking reward: r = 1 - clip(α·|err|, 0, 1.5).
@@ -1241,6 +1254,8 @@ class BIRLTask(NullTask):
             power=power_rew * w.get('power', 0.0),
             air_time=air_time_rew * w.get('air_time', 0.0),
             foot_stand=foot_stand_rew * w.get('foot_stand', 0.0),
+            base_height_l2=base_height_l2 * w.get('base_height_l2', 0.0),
+            flat_orient_l2=flat_orient_l2 * w.get('flat_orient_l2', 0.0),
         )
 
         # Imitation rewards (only active when reference clips are loaded).
