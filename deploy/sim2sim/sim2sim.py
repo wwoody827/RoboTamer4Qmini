@@ -115,6 +115,10 @@ def manifest_to_sim2sim_cfg(manifest, policy_path):
         'phase_freq_low':     freq_low,
         'phase_freq_high':    freq_high,
         'phase_freq_default': freq_default,
+        # Obs delay DR — sampled per-episode in evaluate.run_episode.
+        'delay_joint_ranges': list(manifest.get('delay_joint_ranges', [10, 40])),
+        'delay_angle_ranges': list(manifest.get('delay_angle_ranges', [20, 50])),
+        'delay_rate_ranges':  list(manifest.get('delay_rate_ranges',  [20, 50])),
     }
     return cfg
 
@@ -468,10 +472,17 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, cmd_freq=None, duration=Non
     phase_mode  = cfg.get('phase_mode', 'output')
     action_mode = cfg.get('action_mode', 'increment')
     lp_alpha    = cfg.get('action_lowpass_alpha', 1.0)
-    is_mirl     = (phase_mode == 'none')
-    is_bdx      = (phase_mode == 'input')
+    obs_per_step = int(cfg.get('num_obs_per_step', 0))
+    # obs_per_step=38 = no-phase-in-obs layout. Used by walk_noclock (mode=none)
+    # AND walk_noclock_v3 (mode=input + Cassie-style — clock ticks for reward
+    # at training time but is intentionally absent from obs).
+    is_noclock  = (obs_per_step == 38)
+    is_mirl     = (phase_mode == 'none' and not is_noclock)
+    is_bdx      = (phase_mode == 'input' and not is_noclock)
     print(f"[sim2sim] phase.mode={phase_mode}, action_mode={action_mode}, lowpass_alpha={lp_alpha}")
-    if is_mirl:
+    if is_noclock:
+        print("[sim2sim] no-clock mode (10-dim action, 38-dim obs, no phase, no ref slots)")
+    elif is_mirl:
         print("[sim2sim] MIRL mode (10-dim action, 64-dim obs, no phase modulator)")
     elif is_bdx:
         print("[sim2sim] BD_X mode (10-dim action, external phase clock, absolute targets)")
@@ -650,6 +661,22 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, cmd_freq=None, duration=Non
         obs = np.clip(obs, -3.0, 3.0)
         return obs
 
+    def get_obs_noclock():
+        """walk_noclock obs: 38-dim, 6 slots, no phase, no ref."""
+        q  = data.qpos[QPOS_START:QPOS_START + NUM_JOINTS]
+        dq = data.qvel[QVEL_START:QVEL_START + NUM_JOINTS]
+        quat, base_ang_vel = _get_imu_state()
+        base_euler = quat_to_euler_xyz(quat)[:2]
+        obs = np.concatenate([
+            commands,                # 3
+            base_euler,              # 2
+            base_ang_vel * 0.5,      # 3
+            q - ref_joint,           # 10
+            dq * 0.1,                # 10
+            current_joint_act - q,   # 10
+        ]).astype(np.float32)
+        return np.clip(obs, -3.0, 3.0)
+
     def get_obs_bdx():
         """Build BD_X-style observation vector (phase.mode=input, 43-dim).
 
@@ -743,6 +770,8 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, cmd_freq=None, duration=Non
                 if is_bdx:
                     ext_clock.update(cmd_freq)
                     obs_now = get_obs_bdx()
+                elif is_noclock:
+                    obs_now = get_obs_noclock()
                 elif is_mirl:
                     obs_now = get_obs_mirl()
                 else:

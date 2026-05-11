@@ -72,8 +72,12 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
     phase_mode  = cfg.get('phase_mode', 'output')
     action_mode = cfg.get('action_mode', 'increment')
     lp_alpha    = cfg.get('action_lowpass_alpha', 1.0)
-    is_mirl     = (phase_mode == 'none')
-    is_bdx      = (phase_mode == 'input')
+    # obs_per_step=38 = "no-clock-in-obs" layout: 6 plain slots, no phase, no ref.
+    # Used by walk_noclock (phase.mode=none) AND walk_noclock_v3 (phase.mode=input
+    # but the phase slots are intentionally absent from obs — Cassie-style).
+    is_noclock  = (obs_dim == 38)
+    is_mirl     = (phase_mode == 'none' and not is_noclock)
+    is_bdx      = (phase_mode == 'input' and not is_noclock)
 
     commands    = np.array([cmd_vx, cmd_vy, cmd_yaw], dtype=np.float32)
     static_flag = float(np.linalg.norm(commands) >= static_thr)
@@ -148,12 +152,51 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
             world_angvel = data.qvel[3:6]
         return quat, quat_rotate_inverse(quat, world_angvel)
 
+    # ─── Obs-delay DR (mirrors training, was missing in sim2sim) ────────────
+    # Training side: env/legged_robot.py:step_torques runs once per PHYSICS
+    # step (1000 Hz). joint_pos_his.append(...) happens there. delay(N) in
+    # birl_task.step() then reads N PHYSICS-step-old values. So config
+    # delay_joint_ranges=[10, 40] means 10-40 ms at 1 ms phys dt.
+    #
+    # We must push at PHYSICS rate (inside the decimation loop), not policy
+    # rate. An earlier version pushed once per policy step (67 Hz), which
+    # made the effective delay 15× too long (150-600 ms vs the 10-40 ms the
+    # policy was actually trained against). That broke walk_v34 from 100 %
+    # to 7 % sim2sim survival — root cause of the "no-clock failure" panic.
+    rng = np.random.default_rng(seed)
+    _dj = cfg.get('delay_joint_ranges', [10, 40])
+    _da = cfg.get('delay_angle_ranges', [20, 50])
+    _dr = cfg.get('delay_rate_ranges',  [20, 50])
+    delay_jnt   = int(rng.integers(_dj[0], _dj[1] + 1))   # physics steps
+    delay_angle = int(rng.integers(_da[0], _da[1] + 1))   # physics steps
+    delay_rate  = int(rng.integers(_dr[0], _dr[1] + 1))   # physics steps
+    delay_max   = max(delay_jnt, delay_angle, delay_rate, 1)
+    # History deques — newest at right (index -1), oldest at left.
+    _q_buf   = deque([ref_joint.copy() for _ in range(delay_max + 1)], maxlen=delay_max + 1)
+    _dq_buf  = deque([np.zeros(NUM_JOINTS, dtype=np.float32) for _ in range(delay_max + 1)], maxlen=delay_max + 1)
+    _eul_buf = deque([np.zeros(2, dtype=np.float32) for _ in range(delay_max + 1)], maxlen=delay_max + 1)
+    _av_buf  = deque([np.zeros(3, dtype=np.float32) for _ in range(delay_max + 1)], maxlen=delay_max + 1)
+
+    def _push_obs_history():
+        """Push current rigid-body state into the per-quantity delay buffers.
+        Call once per PHYSICS step (matches training's step_torques cadence)."""
+        q  = data.qpos[QPOS_START:QPOS_START + NUM_JOINTS].astype(np.float32).copy()
+        dq = data.qvel[QVEL_START:QVEL_START + NUM_JOINTS].astype(np.float32).copy()
+        quat, base_ang_vel = _imu_state()
+        base_euler = quat_to_euler_xyz(quat)[:2].astype(np.float32).copy()
+        _q_buf.append(q)
+        _dq_buf.append(dq)
+        _eul_buf.append(base_euler)
+        _av_buf.append(base_ang_vel.astype(np.float32).copy())
+
+    def _delayed():
+        """Return (q, dq, base_euler, base_ang_vel) at the per-episode delays."""
+        return (_q_buf[-1 - delay_jnt], _dq_buf[-1 - delay_jnt],
+                _eul_buf[-1 - delay_angle], _av_buf[-1 - delay_rate])
+
     def get_obs():
         """BIRL obs: 44-dim standard, 47-dim teacher (+ base_lin_vel)."""
-        q  = data.qpos[QPOS_START:QPOS_START + NUM_JOINTS]
-        dq = data.qvel[QVEL_START:QVEL_START + NUM_JOINTS]
-        quat, base_ang_vel = _imu_state()
-        base_euler   = quat_to_euler_xyz(quat)[:2]
+        q, dq, base_euler, base_ang_vel = _delayed()
         pm_phase_val = np.concatenate([np.sin(pm.phase), np.cos(pm.phase)]) * static_flag
         pm_f_val     = (pm.frequency * 0.3 - 1.0) * static_flag
         parts = [
@@ -162,17 +205,16 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
             pm_phase_val, pm_f_val,
         ]
         if obs_dim == 47:
-            base_lin_vel = quat_rotate_inverse(quat, data.qvel[:3]).astype(np.float32)
+            # Teacher uses current (un-delayed) base_lin_vel — privileged obs.
+            quat_now, _ = _imu_state()
+            base_lin_vel = quat_rotate_inverse(quat_now, data.qvel[:3]).astype(np.float32)
             parts.append(base_lin_vel)
         obs = np.concatenate(parts).astype(np.float32)
         return np.clip(obs, -3.0, 3.0)
 
     def get_obs_mirl():
         """MIRL obs: 64-dim with 8 command slots, no phase modulator."""
-        q  = data.qpos[QPOS_START:QPOS_START + NUM_JOINTS]
-        dq = data.qvel[QVEL_START:QVEL_START + NUM_JOINTS]
-        quat, base_ang_vel = _imu_state()
-        base_euler    = quat_to_euler_xyz(quat)[:2]
+        q, dq, base_euler, base_ang_vel = _delayed()
         commands_8    = np.array([commands[0], commands[1], commands[2],
                                    0., 0., 0., 0., 0.], dtype=np.float32)
         obs = np.concatenate([
@@ -186,12 +228,22 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
         ]).astype(np.float32)
         return np.clip(obs, -3.0, 3.0)
 
+    def get_obs_noclock():
+        """walk_noclock obs: 38-dim, 6 slots, no phase, no ref."""
+        q, dq, base_euler, base_ang_vel = _delayed()
+        obs = np.concatenate([
+            commands,                # 3
+            base_euler,              # 2
+            base_ang_vel * 0.5,      # 3
+            q - ref_joint,           # 10
+            dq * 0.1,                # 10
+            current_joint_act - q,   # 10
+        ]).astype(np.float32)
+        return np.clip(obs, -3.0, 3.0)
+
     def get_obs_bdx():
         """BD_X obs: 43-dim with external phase clock + normalized freq cmd."""
-        q  = data.qpos[QPOS_START:QPOS_START + NUM_JOINTS]
-        dq = data.qvel[QVEL_START:QVEL_START + NUM_JOINTS]
-        quat, base_ang_vel = _imu_state()
-        base_euler    = quat_to_euler_xyz(quat)[:2]
+        q, dq, base_euler, base_ang_vel = _delayed()
         phase_clock   = ext_clock.sin_cos() * static_flag
         freq_cmd_norm = np.array(
             [((cmd_freq - freq_mid) / freq_scale) * static_flag],
@@ -244,10 +296,16 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
     peak_ratio = 0.0
 
     for step in range(total_steps):
+        # Push to delay buffers every PHYSICS step (matches training's
+        # step_torques cadence). Policy reads delayed values at the policy
+        # boundary below.
+        _push_obs_history()
         if step % decimation == 0:
             if is_bdx:
                 ext_clock.update(cmd_freq)
                 obs_now = get_obs_bdx()
+            elif is_noclock:
+                obs_now = get_obs_noclock()
             elif is_mirl:
                 obs_now = get_obs_mirl()
             else:
@@ -390,6 +448,7 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
     z_steady = [z for (t, z) in base_z_samples if t >= STARTUP]
     com_z_rms = (float(np.sqrt(np.mean([(z - target_h) ** 2 for z in z_steady])))
                  if z_steady else float('nan'))
+    com_z_mean = float(np.mean(z_steady)) if z_steady else float('nan')
 
     # yaw_osc_rms: residual yaw after removing cmd_yaw linear trend + mean offset —
     # measures "hip-swinging". Only defined after unwrap; for cmd_yaw==0 this is
@@ -465,6 +524,7 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
         'pitch_rms':      float(np.sqrt(np.mean(pitch_rms_acc))) if pitch_rms_acc else float('nan'),
         'cot':            cot,
         'com_z_rms':      com_z_rms,
+        'com_z_mean':     com_z_mean,
         'yaw_osc_rms':    yaw_osc_rms,
         'measured_freq':  measured_freq,
         'duty_factor':    duty_factor,

@@ -963,7 +963,9 @@ class BIRLTask(NullTask):
             reg_norm_inv = reg_norm_inv
         else:
             reg_norm_inv = torch.ones_like(lin_vel_x_norm)
-        base_heit_rew = torch.exp(-70 * (self.env.base_pos[:, [2]] - 0.45) ** 2)
+        _bh_slope = float(getattr(self.cfg.reward, 'base_heit_slope', 70.0) or 70.0)
+        _bh_target = float(getattr(self.cfg.reward, 'base_heit_target', 0.45) or 0.45)
+        base_heit_rew = torch.exp(-_bh_slope * (self.env.base_pos[:, [2]] - _bh_target) ** 2)
 
         balance_rew = 0.5 * (base_heit_rew * torch.exp(-torch.clip(5. / lin_vel_x_norm, min=2, max=8.) * torch.norm(self.env.base_euler[:, :2], dim=-1, keepdim=True)) + 1.)
 
@@ -1158,15 +1160,30 @@ class BIRLTask(NullTask):
         # target_swing = (1 - support_ratio) / cmd_freq, per env.
         # Mini-step has swing < target → delta < 0 → continuous penalty until
         # next swing is long enough.
+        # Two flavors: cmd_freq-aware (when external clock supplies freq) or
+        # fixed-target (legged-gym style, when there's no clock).
         if self._phase_mode == 'input' and self._cmd_freq is not None:
             support_ratio = float(getattr(self.cfg.phase, 'support_ratio', 0.6) or 0.6)
             target_swing = (1.0 - support_ratio) / self._cmd_freq        # [n_envs, 1]
+        elif self._phase_mode == 'none':
+            # No clock — target swing is a fixed scalar (legged-gym default ~0.2s).
+            target_swing = float(getattr(self.cfg.phase, 'target_swing', 0.2) or 0.2)
+        else:
+            target_swing = None
+
+        if target_swing is not None:
             new_delta = (self._td_swing_duration - target_swing).clip(min=-0.5, max=0.5)
-            # Update held value at each touchdown event
             self._held_air_delta = torch.where(self._td_event, new_delta, self._held_air_delta)
             air_time_rew = self._held_air_delta.mean(dim=1, keepdim=True) * self.static_flag
         else:
             air_time_rew = torch.zeros(self.num_envs, 1, device=self.device)
+
+        # Foot stand reward: ‖cmd‖<0.15 → reward both feet on ground.
+        # Counters the "no positive incentive to keep feet planted" gap at
+        # standstill (where all foot_* and air_time rewards are static_flag-gated).
+        # Active ONLY when commanded to stand; range [0, 1].
+        foot_stand_rew = (support_foot_index.float().mean(dim=1, keepdim=True)
+                          * (1.0 - self.static_flag))
 
         # Mechanical power penalty: |torque × joint_vel|
         power_rew = -torch.sum(
@@ -1223,6 +1240,7 @@ class BIRLTask(NullTask):
             yaw_smooth=yaw_smooth_rew * w.get('yaw_smooth', 0.0),
             power=power_rew * w.get('power', 0.0),
             air_time=air_time_rew * w.get('air_time', 0.0),
+            foot_stand=foot_stand_rew * w.get('foot_stand', 0.0),
         )
 
         # Imitation rewards (only active when reference clips are loaded).

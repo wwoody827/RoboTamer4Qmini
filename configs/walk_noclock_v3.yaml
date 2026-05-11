@@ -1,0 +1,368 @@
+# walk_noclock_v3.yaml — Cassie-style periodic reward (clock in reward, not in obs).
+#
+# Builds on walk_noclock_v2. Keeps:
+#   • foot_stand reward (v2's standstill fix)
+#   • Sim2sim delay DR (v2's eval-side fix, in code not config)
+#
+# Adds: the external phase clock comes BACK as a reward-side scheduler, but
+# its sin/cos and freq_cmd slots are STILL absent from the policy obs.
+# This is Siekmann et al. (2021) "Sim-to-Real Learning of All Common Bipedal Gaits"
+# applied to our setup — the policy learns gait timing from the *reward landscape*
+# (foot_phase rew encourages swing/stance alignment with the clock) but has
+# no explicit phase input. At deploy, no clock signal is needed.
+#
+# Why this might beat v2:
+#   v2's only timing signal is the air_time reward (target swing 0.2s). That's
+#   a scalar target — policy can hit it via any gait pattern (hop, shuffle,
+#   left-right asymmetric). foot_phase reward, in contrast, requires the policy
+#   to match a SPECIFIC swing-stance schedule — biased toward natural walking
+#   gaits, harder to game with hopping. Cassie / MIT humanoid papers report
+#   that periodic reward without obs slot is comparable to with-clock-obs.
+#
+# Concretely vs v2:
+#   • phase.mode: none → input            (internal clock ticks, swing/stance masks
+#                                          come from clock automatically when mode=input)
+#   • obs slots: unchanged                (6 slots, 38 dim/frame, no phase visible)
+#   • foot_phase weight: 0 → 4.0          (reward-side gait scheduler)
+#   • air_time weight: 5.0 → 2.0          (less load-bearing — foot_phase takes over)
+#
+# Risk: policy may not be able to invert "what gait clock matches my proprio?"
+# from delayed obs alone, and either ignore phase reward or oscillate. If reward
+# doesn't increase past iter ~1500, fall back to v2-style.
+#
+# Differences vs walk_rl.yaml (now flattened, no _base):
+#   • phase.mode: input → none           (no clock, no phase obs slot)
+#   • obs slots: 8 → 6                   (drop phase_clock + phase_freq_cmd)
+#   • obs total: 215 → 190               (38 per-frame × 5 stacked)
+#   • action dim: 10                     (unchanged — joints only since v20)
+#   • air_time weight: 1.0 → 5.0         (load-bearing — the new gait scheduler)
+#   • phase.target_swing: 0.2 s          (legged-gym default; ~2.5 Hz gait)
+#   • foot_phase weight: 0.0             (no clock to phase-match against)
+#   • base_heit weight: 1.0 → 2.0        (counter the low-walk tendency in v34)
+#   • base_heit_slope: 70 → 150          (tighter — 5 cm error costs 47% reward)
+#   • base_heit_target: 0.45             (explicit; matches training init height)
+#   • leg_width_rew: 0.5 → 1.0           (counter foot-cross without phase guard)
+#   • foot_clr / foot_supt / foot_heit   (bumped 1.0→1.5 / 0.7→1.0 / 0.7→1.0)
+#
+# Carry-overs from walk_rl (don't change what's working):
+#   • cmd_track_lp_alpha: 0.95           (the breakthrough — keep)
+#   • Industry-aligned regulators        (act_smo 0.30, jnt_vel 1e-3, ...)
+#   • Tracking weights + slopes          (fwd_vel 2, yaw_rat 3, lateral 2)
+#   • regime: pure_and_pairs             (regime_weights [1, 2, 1, 1.5, 1.5])
+#   • resampling_time: 10                (single cmd per episode)
+#   • action_mode: absolute, alpha 0.75  (BD_X stack — no change)
+#
+# Reference points (what others use):
+#   • legged-gym Anymal/G1: history 5, no clock, air_time weight 1-2, base_h 50
+#   • DreamWaQ / HIM: 5-frame history + adaptation encoder, no clock
+#   • Unitree G1 SDK example: 6 frames, no clock, air_time-driven gait
+#   • Walk These Ways: frequency as separate user command (5D cmd space) — not this
+#   • Cassie periodic reward: phase as scheduler only, not obs — close to us
+#
+# Expected reward (rough, from walk_v34 TB analysis at iter 3200):
+#   walk_v34 mean_reward ≈ 71.7/step. Asymptotic target: 68-75/step.
+#   Early iters (≤1000) likely 30-50% lower while gait discovery happens.
+#   mean_episode_length: 625 (walk_v34) → expect 350-500 early, 600+ converged.
+#
+# Failure-mode probes if not converged by ~5k iters:
+#   shuffle gait → bump air_time to 8.0
+#   hopping      → drop air_time to 3.0, bump leg_width_rew
+#   walks low    → bump base_heit_slope to 200
+
+task:
+  cfg: BIRL
+  use_teacher_obs: false
+  foot_mask_mode: contact          # ignored when phase.mode=input (uses ext clock masks)
+  ref_clip_paths: []
+  w_imit: 0.5
+  w_task: 0.5
+
+phase:
+  mode: input             # clock ticks internally; obs slots NOT added below
+  target_swing: 0.2       # 200 ms swing target — legged-gym style, ~2.5 Hz gait
+  support_ratio: 0.6      # retained for any path that still references it
+  base_freq: 1.0          # unused in mode=none
+  vel_scale: 1.0          # unused in mode=none
+  freq_low: 2.0           # unused
+  freq_high: 3.0          # unused
+  freq_default: 2.5       # unused
+
+observation:
+  history: 5
+  skip: 2
+  # 6 slots × 5 frames = 190-dim (was 215 with phase_clock + phase_freq_cmd)
+  slots:
+    - commands_3
+    - base_euler
+    - base_ang_vel
+    - joint_pos_err
+    - joint_vel
+    - joint_tracking_err
+
+action:
+  action_mode: absolute
+  action_lowpass_alpha: 0.75
+  # 12-dim ranges (legacy — only first 10 are used in mode=none)
+  high_ranges: [3.0, 3.0,  1.0, 1.0, 1.0, 1.0, 1.0,  1.0, 1.0, 1.0, 1.0, 1.0]
+  low_ranges:  [0.5, 0.5, -1.0,-1.0,-1.0,-1.0,-1.0, -1.0,-1.0,-1.0,-1.0,-1.0]
+  inc_high_ranges: [10., 10., 10., 10., 10., 10., 10., 10., 10., 10.]
+  inc_low_ranges:  [-10.,-10.,-10.,-10.,-10.,-10.,-10.,-10.,-10.,-10.]
+  abs_high_ranges: null
+  abs_low_ranges:  null
+  action_limit_up: null
+  action_limit_low: null
+  ref_joint_pos: [ 0.4, -0.1, -1.5,  1.0, -1.3,
+                  -0.4,  0.1,  1.5, -1.0,  1.3]
+  use_actuator_delay: false
+  actuator_delay_range: [1, 3]
+  use_actuator_filter: false
+  actuator_filter_alpha_range: [0.3, 0.7]
+
+init_state:
+  random_rot: true
+  num_legs: 2
+  pos: [0.0, 0.0, 0.45]                # matches base_heit_target
+  rot: [0.0, 0.0, 0.0, 1.0]
+  lin_vel: [0.0, 0.0, 0.0]
+  ang_vel: [0.0, 0.0, 0.0]
+  reset_joint_pos: [ 0.4, -0.1, -1.5,  1.0, -1.3,
+                    -0.4,  0.1,  1.5, -1.0,  1.3]
+
+command:
+  curriculum: false
+  max_curriculum: 1.0
+  num_commands: 4
+  resampling_time: 10.0                # = episode length: one cmd per episode
+  heading_command: false
+  use_heading_reward: false
+  use_yaw_smooth_reward: false
+  lin_vel_x_range: [-0.3, 0.7]
+  lin_vel_y_range: [-0.3, 0.3]
+  ang_vel_yaw_range: [-1.0, 1.0]
+  heading_range: [0.0, 3.141592653589793]
+  regime: pure_and_pairs               # 50% pure / 25% vx+vy / 25% vx+yaw
+  regime_weights: [1.0, 2.0, 1.0, 1.5, 1.5]   # pure_vy bumped (28%)
+  norm_includes_yaw: false
+
+reward:
+  # ── Gait scheduler: Cassie-style periodic reward (clock in reward only) ──
+  foot_phase:      4.0            # internal clock drives swing/stance reward
+  air_time:        2.0            # was 5.0 — now redundant with foot_phase, keep moderate
+  foot_clr:        1.5
+  foot_supt:       1.0            # uses ext-clock-derived mask (foot_mask_mode=input)
+  foot_heit:       1.0
+  leg_width_rew:   1.0
+
+  # ── Stand-quiet: NEW in v2 ───────────────────────────────────────────────
+  # foot_stand fires only when ‖cmd‖<0.15. Reward = mean(foot_frc>=10) ∈ [0,1].
+  # Counters the "no incentive to keep feet planted at stand" gap that gave
+  # walk_rl@3200 its 7.6 Hz hip jitter at cmd=0. Range bounded so it can't
+  # explode; weight should be comparable to a tracking term (~1-2).
+  foot_stand:      1.0
+
+  # ── Posture: tighten base_heit so walk-low cheat is uneconomic ───────────
+  base_heit:        2.0           # was 1.0 — 2× the pull toward standing height
+  base_heit_slope:  150.0         # was hardcoded 70 — 5 cm err → 47% reward
+  base_heit_target: 0.45          # explicit; matches init_state.pos.z
+  balance:          1.5
+  twist:            2.5
+
+  # ── Tracking (LP-filtered measurement is the breakthrough; carry over) ──
+  fwd_vel:        2.0
+  yaw_rat:        3.0
+  lateral_vel:    2.0
+  fwd_err_slope:      3.0
+  lateral_err_slope:  5.0
+  yaw_err_slope:      3.0
+  fwd_err_deadzone:     0.1
+  lateral_err_deadzone: 0.1
+  yaw_err_deadzone:     0.05
+  cmd_track_lp_alpha: 0.95        # 290 ms EMA on tracked vel/ang — keep
+
+  # ── Regulators (industry-aligned scale; legged_gym / G1 / humanoid-gym) ─
+  reg_use_norm_scaling: false     # drop 1/lin_vel_x_norm amplification
+  act_smo:        0.30
+  act_const:      0.02
+  sa_const:       0.01
+  jnt_pos_err:    0.02
+  foot_sft:       0.5
+  foot_slip:      0.05
+  foot_vz:        0.02
+  foot_acc:       0.005
+  jnt_vel:        0.001
+  joint_tor:      0.0001
+  net_smo:        0.001
+  net_out_val:    1.0e-05
+  base_acc:       0.01
+  power:          0.1
+  feet_py:        0.5
+  feet_frc:       0.0
+
+  # ── Misc kept ───────────────────────────────────────────────────────────
+  constant:       0.3
+  vertical_vel:   0.6
+  ang_vel:        0.6
+
+  # ── Off ─────────────────────────────────────────────────────────────────
+  pmf:            0.0
+  heading:        0.0
+  yaw_smooth:     0.0
+
+  component_clip_min: -4.0
+  component_clip_max:  5.0
+
+runner:
+  seed: 1
+  max_iterations: 5000
+  num_steps_per_env: 24
+  save_interval: 200
+  num_envs: 4096
+  env_spacing: 3.0
+  send_timeouts: true
+  episode_length_s: 10
+  use_mirror_augmentation: true   # 6-slot × 10-dim — generic Mirror handles it
+  mirror_weight: 0.5
+
+policy:
+  name: simple_policy
+  num_actions: null
+  num_critic_obs: null
+  num_observations: null
+  hidden_layers: [512, 256]
+  activation: relu
+
+algorithm:
+  value_loss_coef: 1.0
+  use_clipped_value_loss: true
+  eps_clip: 0.2
+  entropy_coef: 0.0005
+  num_learning_epochs: 3
+  num_mini_batches: 4
+  learning_rate: 0.001
+  schedule: adaptive
+  discount_factor: 0.995
+  gae_lambda: 0.95
+  desired_kl: 0.01
+  max_grad_norm: 1.0
+  normalize_value: true
+
+pd_gains:
+  decimation: 15
+  stiffness:
+    hip_yaw: 55.0
+    hip_roll: 105.0
+    hip_pitch: 75.0
+    knee: 45.0
+    ankle: 30.0
+  damping:
+    hip_yaw: 0.3
+    hip_roll: 2.5
+    hip_pitch: 0.3
+    knee: 0.5
+    ankle: 0.25
+
+domain_rand:
+  randomize_friction: true
+  friction_range: [0.2, 3.0]
+  rest_offset_range: [0.0, 0.0]
+  randomize_mass: true
+  added_mass_range: [0.5, 1.5]
+  added_inertia_range: [0.5, 1.5]
+  randomize_damping: true
+  added_friction_range: [0.8, 1.2]
+  added_damping_range: [0.8, 1.2]
+  randomize_torque: true
+  torque_range: [0.8, 1.2]
+  torque_noise_std: 0.0
+  randomize_gains: true
+  gains_range: [0.8, 1.2]
+  push_robots: true
+  max_push_vel_xy: 0.5
+  max_push_rate_xyz: 0.5
+  push_interval_s: 3.0
+  delay_observation: true
+  delay_joint_ranges: [10, 40]
+  delay_rate_ranges:  [20, 50]
+  delay_angle_ranges: [20, 50]
+
+noise_values:
+  randomize_noise: true
+  use_state_filter: false
+  lin_vel: 0.3
+  gravity: 0.15
+  ang_vel: 0.3
+  foot_frc: 5.0
+  dof_pos: 0.1
+  dof_vel: 1.2
+  base_acc: 3.0
+
+terrain:
+  mesh_type: trimesh
+  horizontal_scale: 0.1
+  vertical_scale: 0.01
+  border_size: 5
+  static_friction: 1.0
+  dynamic_friction: 1.0
+  restitution: 0.05
+  measured_points_x: [-0.05, 0, 0.05]
+  measured_points_y: [-0.05, 0, 0.05]
+  curriculum: false
+  measure_heights: false
+  selected: false
+  terrain_kwargs: null
+  max_init_terrain_level: 3
+  terrain_length: 15
+  terrain_width: 15
+  num_rows: 20
+  num_cols: 20
+  terrain_proportions: [1.0, 0.0, 0.0, 0.0, 0.0]
+  slope_treshold: 0.0
+
+sim:
+  dt: 0.001
+  substeps: 1
+  up_axis: 1
+  gravity: [0.0, 0.0, -9.81]
+  physx:
+    solver_type: 1
+    num_threads: 10
+    num_position_iterations: 4
+    num_velocity_iterations: 0
+    contact_offset: 0.01
+    rest_offset: 0.0
+    bounce_threshold_velocity: 0.5
+    max_depenetration_velocity: 1.0
+    max_gpu_contact_pairs: 8388608
+    default_buffer_size_multiplier: 5
+    contact_collection: 2
+    use_gpu: true
+
+asset:
+  enable_bar: false
+  file: assets/q1/urdf/q1.urdf
+  imu_name: imu_in_torso
+  foot_name: [ankle_pitch]
+  base_name: base_link
+  penalize_contacts_on: [knee, hip]
+  terminate_after_contacts_on: [knee, base, hip]
+  disable_gravity: false
+  collapse_fixed_joints: true
+  fix_base_link: false
+  default_dof_drive_mode: 3
+  self_collisions: 0
+  replace_cylinder_with_capsule: true
+  flip_visual_attachments: false
+  use_mesh_materials: true
+  density: 0.1
+  angular_damping: 0.0
+  linear_damping: 0.0
+  max_angular_velocity: 100.0
+  max_linear_velocity: 100.0
+  armature: 0.0
+  thickness: 0.01
+
+viewer:
+  pos: [0, 0, 0.6]
+  lookat: [0.0, 0, 0.6]
+  fixed_robot_id: 0
+  fixed_offset: [0.0, 2.0, 0.6]

@@ -1,0 +1,24 @@
+# walk_rl_v2 — walk_v34 baseline + foot_stand (standstill fix).
+#
+# Built after the no-clock experiments (v1-v4) confirmed that NO recipe variant
+# without the obs-phase clock can match walk_v34's sim2sim transfer in our
+# setup. The IG↔MuJoCo contact gap dominates whenever the policy lacks a
+# deterministic physics-independent timing anchor.
+#
+# So this config keeps everything from walk_rl.yaml (proven 100 % sim2sim
+# survival) and adds ONLY:
+#   • reward.foot_stand: 1.0   — fixes the standstill jitter that walk_v34 has
+#                                at cmd=0 (7.6 Hz hip oscillation, com_z_rms=0.118)
+#
+# Why this should give us a deployable policy:
+#   1. walk_v34's recipe is sim2sim-proven (100 % survival at iter 3200).
+#   2. The only missing piece for deployment was a clean stand — foot_stand
+#      gives the policy a positive incentive to keep feet planted when
+#      ‖cmd‖<0.15, where all other foot_* rewards are static_flag-gated off.
+#   3. foot_stand only fires at standstill — zero interaction with walking,
+#      so transfer ability should be preserved.
+
+_base: walk_rl.yaml
+
+reward:
+  foot_stand: 1.0

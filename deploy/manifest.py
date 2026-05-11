@@ -70,7 +70,13 @@ def build_manifest(params):
         'activation': policy_cfg.get('activation', 'relu'),
         'simulation_dt': sim_cfg.get('dt', 0.001),
         'urdf_path': asset_cfg.get('file', 'assets/q1/urdf/q1.urdf'),
-        'init_height': 0.5,
+        'init_height': float(params.get('init_state', {}).get('pos', [0, 0, 0.5])[2]),
+        # Obs delay ranges (mirrored by sim2sim — was missing, contributed to
+        # the IG↔MuJoCo sim2real gap by feeding policy ~0-step delayed obs at
+        # eval vs ~10-50 step delayed obs at training).
+        'delay_joint_ranges': list(params.get('domain_rand', {}).get('delay_joint_ranges', [10, 40])),
+        'delay_angle_ranges': list(params.get('domain_rand', {}).get('delay_angle_ranges', [20, 50])),
+        'delay_rate_ranges':  list(params.get('domain_rand', {}).get('delay_rate_ranges',  [20, 50])),
     }
 
     # Recovery-task-specific section (consumed by high-level controller in deploy).
