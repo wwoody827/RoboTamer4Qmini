@@ -1,4 +1,6 @@
-# walk_v20 — current best baseline (flattened, no _base inheritance).
+# walk_bdx_base — BD_X-style training stack (phase.mode=input, action_mode=absolute,
+# 10-dim action, external phase clock, regime sampling). Was walk_v20 in development.
+# Inherited by walk_rl → walk_mirl.
 #
 # Lineage: walk_v2 → v3 → v4 → v5 → v6 → v8 → v9 → v10 → v11 → v20.
 # All speculative tweaks tested in v1-v19 either reverted or kept here.

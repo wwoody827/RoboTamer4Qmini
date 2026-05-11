@@ -1,4 +1,4 @@
-# walk_v39_mirl — MIRL best baseline. Inherits walk_v34 reward stack and adds:
+# walk_mirl — MIRL best baseline (inherits walk_rl). Was walk_v39_mirl in development. Adds:
 #   1. Motion-imitation reward from a curated demo dataset (BC-style traces
 #      filtered for tracking + freq lock + tilt + torque, cmd_relabel applied).
 #   2. Full RSI: robot is reset to a clip frame's joint + base state, with
@@ -7,8 +7,11 @@
 #      L2 in cmd_relabel space (top-3 nearest, sampled uniformly).
 #   4. w_imit anneals 0.4 → 0.0 over 3000 iters so the policy gets a scaffold
 #      early and then is owned entirely by task reward in the late phase.
-#   5. Slightly stronger foot_phase + air_time to lock measured gait freq
-#      to the external clock (without strangling tracking like 1.0 did).
+#   5. No reward overrides vs walk_rl. Freq lock comes for free because
+#      demos in the dataset are already filtered for freq lock (see build
+#      flag --max_freq_dev 0.3); imitation transfers it to the student.
+#      Bumping foot_phase here was tried (0.6 and 1.0) and both collapsed
+#      training — demo phase and external clock phase don't perfectly agree.
 #
 # Dataset: data/datasets/walk_combined_freq_locked
 #   437 HQ traces / 85 min, recorded from walk_v34 (9 ckpts) + walk_v38 (6 ckpts)
@@ -27,13 +30,14 @@
 # Robustness: imitation reward and RSI only use joint state + base state +
 # cmd_const from the clips. Switching obs slots, frame-stacking, action_dim,
 # or network arch leaves the imitation pipeline unchanged.
-_base: walk_v34.yaml
+_base: walk_rl.yaml
 
-reward:
-  # Frequency lock — stronger pressure to match external clock without
-  # being so high it strangles tracking (1.0 collapsed training to standstill).
-  foot_phase: 0.6           # base 0.3 → 0.6 (2×)
-  air_time:   1.5           # walk_v34 1.0 → 1.5 (50% bump on swing-duration)
+# No reward overrides vs walk_rl. Demos in the dataset are pre-filtered for
+# freq lock (--max_freq_dev 0.3 in build_bc_dataset), so the imitation reward
+# (matching demo joint trajectories) automatically transfers freq lock.
+# Bumping foot_phase here was tried (0.6 and 1.0); both collapsed training
+# because demo-phase and clock-phase don't always perfectly agree, and
+# pulling for both at once leaves the policy stuck between them.
 
 task:
   # MIRL pipeline (gated by ref_clip_dataset != null in env/tasks/birl_task.py).

@@ -1,4 +1,4 @@
-# walk_v34 — RL-only best baseline. Self-contained (inherits walk_v20 BD_X stack).
+# walk_rl — RL-only best baseline (inherits walk_bdx_base). Was walk_v34 in development.
 #
 # Key insight: cmd_track_lp_alpha=0.95 makes tracking error use a 290 ms EMA
 # of body velocity instead of per-step. Within-stride gait sway averages out,
@@ -15,7 +15,7 @@
 #
 # Best ckpts: policy_2800 (unified), policy_3200 (best disp_y + freq lock),
 #             policy_4200 (best yaw). Full report: docs/walk_v34_summary.md
-_base: walk_v20.yaml
+_base: walk_bdx_base.yaml
 
 reward:
   # ─── Regulator calibration (industry-aligned scale; legged_gym / Unitree G1 / humanoid-gym).

@@ -42,3 +42,7 @@ data/datasets/**
 !data/datasets/*/
 !data/datasets/*/dataset.yaml
 !data/datasets/*/episodes.csv
+
+# Deploy candidates — curated policies ready for real-robot deployment.
+# Track everything except large .mp4 demo videos (regenerable via sim2sim).
+deploy_candidates/**/videos/

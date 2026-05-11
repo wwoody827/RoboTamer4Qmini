@@ -389,6 +389,9 @@ class BIRLTask(NullTask):
                 clip['cmd'] = torch.tensor(raw['cmd_const'], dtype=torch.float, device=self.device)
             else:
                 clip['cmd'] = torch.zeros(3, dtype=torch.float, device=self.device)
+            # cmd_freq used by cmd_freq-aware matching: env clock runs at
+            # cmd_freq, so we should imitate demos recorded at that freq.
+            clip['cmd_freq'] = float(raw['cmd_freq']) if 'cmd_freq' in raw.files else 2.5
             clips.append(clip)
         if not clips:
             return
@@ -420,6 +423,8 @@ class BIRLTask(NullTask):
 
         # Per-clip cmd_const for cmd-matched selection
         self._ref_cmd_all = torch.stack([c['cmd'] for c in clips], dim=0)                  # [n_clips, 3]
+        self._ref_freq_all = torch.tensor([c['cmd_freq'] for c in clips],
+                                          dtype=torch.float, device=self.device)            # [n_clips]
 
         self._ref_clip_lengths = torch.tensor([c['T'] for c in clips], dtype=torch.long,  # [n_clips]
                                               device=self.device)
@@ -440,13 +445,27 @@ class BIRLTask(NullTask):
               f"cmd_const: yes), max_T={max_T}")
 
     def _assign_ref_clips(self, env_ids):
-        """Assign each env a clip (cmd-matched if enabled) + random start frame (RSI)."""
+        """Assign each env a clip (cmd-matched if enabled) + start frame.
+
+        Match key includes cmd_freq when available — env clock runs at this
+        rate so we should imitate demos recorded at the same rate (otherwise
+        the imitation signal fights the external clock).
+
+        Start frame is phase-aligned to env clock when possible (so the
+        demo's stride phase agrees with env clock at t=0), else random (RSI).
+        """
         n = len(env_ids)
         if getattr(self, '_ref_cmd_match', False) and self._ref_num_clips > 1:
-            # Pick top-K nearest clips by L2 (yaw weighted 0.5×) then sample uniformly.
+            # 4D similarity: (vx, vy, yaw, cmd_freq). Yaw weight 0.5, freq weight 1.0.
             cmds = self.commands[env_ids, :3]                                              # [n, 3]
             w = torch.tensor([1.0, 1.0, 0.5], device=self.device)
-            d = ((cmds.unsqueeze(1) - self._ref_cmd_all.unsqueeze(0)) * w).pow(2).sum(-1)  # [n, n_clips]
+            d_cmd = ((cmds.unsqueeze(1) - self._ref_cmd_all.unsqueeze(0)) * w).pow(2).sum(-1)  # [n, n_clips]
+            if self._cmd_freq is not None:
+                env_freq = self._cmd_freq[env_ids]                                         # [n, 1]
+                d_freq = (env_freq - self._ref_freq_all.unsqueeze(0)).pow(2)                # [n, n_clips]
+                d = d_cmd + d_freq
+            else:
+                d = d_cmd
             k = min(self._ref_cmd_topk, self._ref_num_clips)
             _, topk_idx = d.topk(k, dim=-1, largest=False)                                 # [n, k]
             pick = torch.randint(0, k, (n,), device=self.device)
@@ -456,7 +475,23 @@ class BIRLTask(NullTask):
                 0, self._ref_num_clips, (n,), device=self.device
             )
         lengths = self._ref_clip_lengths[self._ref_clip_id[env_ids]]
-        rand_frames = (torch.rand(n, device=self.device) * lengths.float()).long()
+        # Phase-align start frame to env clock when ext_clock is available.
+        # demo recorded at cmd_freq advances phase by step_phase = dt * cmd_freq per
+        # frame (in [0, 1) fraction). frames_per_stride = 1/step_phase. Pick a random
+        # stride index k ∈ [0, n_strides), then offset within that stride by
+        # env_phase_frac * frames_per_stride so demo phase matches env clock at t=0.
+        if self._ext_clock is not None:
+            env_phase = self._ext_clock.phase_with_offset[env_ids, 0]                       # [n] rad
+            env_phase_frac = (env_phase / (2 * torch.pi)) % 1.0                            # [n] in [0,1)
+            clip_freq = self._ref_freq_all[self._ref_clip_id[env_ids]]                     # [n]
+            dt = float(self.env.dt)
+            step_phase = (dt * clip_freq).clamp(min=1e-4)                                  # [n]
+            frames_per_stride = 1.0 / step_phase                                            # [n]
+            n_strides = (lengths.float() / frames_per_stride).clamp(min=1.0)
+            stride_k = (torch.rand(n, device=self.device) * n_strides).floor()             # [n]
+            rand_frames = ((stride_k + env_phase_frac) * frames_per_stride).long() % lengths
+        else:
+            rand_frames = (torch.rand(n, device=self.device) * lengths.float()).long()
         self._ref_frame_idx[env_ids] = rand_frames
         self._ref_frame_frac[env_ids] = 0.0
 
