@@ -116,7 +116,8 @@ def relabel_cmd(cmd_orig, mean_realized, mode, cmd_active_thresh=0.05, deadzone=
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('--input',  required=True, help='Parent dir with traces (recursively walks for .npz)')
+    p.add_argument('--input',  required=True, nargs='+',
+                   help='One or more parent dirs with traces (recursively walks for .npz)')
     p.add_argument('--output', required=True, help='Output dataset dir')
     p.add_argument('--include', default='clean',
                    help='Comma-separated classes to include: clean,drift,failure (default: clean)')
@@ -146,24 +147,35 @@ def main():
                    help='Drop trace if peak |torque|/effort_limit exceeds '
                         'this (e.g. 1.2) — flags motor saturation, sim2real '
                         'risk. Computed from torque trace if available. Off by default.')
+    p.add_argument('--cmd_freq', type=float, default=2.5,
+                   help='Expected gait freq (Hz) — must match training cmd_freq.')
+    p.add_argument('--max_freq_dev', type=float, default=None,
+                   help='Drop trace if measured gait freq (FFT on hip_pitch) '
+                        'deviates from --cmd_freq by more than this (Hz). '
+                        'E.g. 0.3 → keep only traces in 2.2-2.8 Hz for cmd_freq=2.5. '
+                        'Stand cmds (||cmd|| < 0.15) are exempt. Off by default.')
+    p.add_argument('--in_dist_cmds_only', action='store_true',
+                   help='Drop traces whose cmd is OOD vs pure_and_pairs training regime: '
+                        'pure_vx, pure_vy, pure_yaw, vx+vy, vx+yaw only. Rejects 3-axis '
+                        'combos and vy+yaw (env never trains these).')
     args = p.parse_args()
 
     # Effort limits (Nm) per joint — used for peak_tau_ratio computation.
     # Order matches NUM_JOINTS: hip_yaw, hip_roll, hip_pitch, knee, ankle (×2 legs).
     EFFORT_LIMITS = np.array([20., 60., 20., 20., 20., 20., 60., 20., 20., 20.], dtype=np.float32)
 
-    in_root = Path(args.input).resolve()
+    in_roots = [Path(p).resolve() for p in args.input]
     out_root = Path(args.output).resolve()
     out_root.mkdir(parents=True, exist_ok=True)
 
     include = set(args.include.split(','))
     drift_thresh = (args.drift_thresh_vx, args.drift_thresh_vy, args.drift_thresh_yaw)
 
-    # Find all trace .npz (skip top-level non-trace files like manifest.csv)
-    npz_files = sorted([p for p in in_root.rglob('*.npz')])
+    # Find all trace .npz across all input roots (skip duplicates).
+    npz_files = sorted({p for root in in_roots for p in root.rglob('*.npz')})
     if not npz_files:
-        sys.exit(f"[build] No .npz under {in_root}")
-    print(f"[build] Scanning {len(npz_files)} candidate traces under {in_root}")
+        sys.exit(f"[build] No .npz under {in_roots}")
+    print(f"[build] Scanning {len(npz_files)} candidate traces under {in_roots}")
 
     # Per-frame chunks (concatenated at end)
     chunks = {k: [] for k in ('obs', 'action_raw', 'action_scaled', 'cmd',
@@ -200,6 +212,19 @@ def main():
 
         # Optional secondary filters (after class-based include).
         cmd_orig_arr = d['cmd_const'].astype(np.float32)
+        # 0) in-distribution cmd filter (matches pure_and_pairs training regime)
+        if args.in_dist_cmds_only:
+            has = [abs(cmd_orig_arr[i]) > args.cmd_active_thresh for i in range(3)]
+            n_active = sum(has)
+            is_in_dist = (
+                n_active == 0                          # stand
+                or n_active == 1                       # pure_vx / vy / yaw
+                or (n_active == 2 and has[0])          # vx+vy or vx+yaw (must have vx)
+            )
+            if not is_in_dist:
+                counts.setdefault('ood_cmd', 0)
+                counts['ood_cmd'] += 1
+                continue
         # 1) tracking efficiency on commanded axes
         if args.min_tracking_eff > 0.0 and cls != 'failure':
             ok = True
@@ -234,6 +259,35 @@ def main():
                 counts.setdefault('high_torque', 0)
                 counts['high_torque'] += 1
                 continue
+        # 5) gait frequency lock (FFT on hip_pitch). Target freq = trace's own
+        # recorded cmd_freq (BD_X external clock); falls back to --cmd_freq
+        # CLI arg only if missing. Exempt stand cmds (no gait pattern).
+        if args.max_freq_dev is not None and 'joint_pos' in d.files:
+            cmd_norm = float(np.linalg.norm(cmd_orig_arr))
+            if cmd_norm >= 0.15:  # walking cmd
+                # Prefer per-trace cmd_freq (recorded by sim2sim) over global.
+                if 'cmd_freq' in d.files:
+                    target_freq = float(d['cmd_freq'])
+                else:
+                    target_freq = args.cmd_freq
+                signal = d['joint_pos'][:, 2].astype(np.float64)  # hip_pitch_l
+                signal = signal - signal.mean()
+                T = len(signal)
+                if T >= 64:
+                    dt = float(d['dt']) if 'dt' in d.files else 0.015
+                    fft = np.fft.rfft(signal)
+                    freqs = np.fft.rfftfreq(T, dt)
+                    mag = np.abs(fft)
+                    mag[0] = 0  # skip DC
+                    # Focus on plausible gait range 1-6 Hz
+                    band = (freqs >= 1.0) & (freqs <= 6.0)
+                    if band.any():
+                        dom_idx = np.where(band)[0][np.argmax(mag[band])]
+                        gait_freq = float(freqs[dom_idx])
+                        if abs(gait_freq - target_freq) > args.max_freq_dev:
+                            counts.setdefault('freq_unlock', 0)
+                            counts['freq_unlock'] += 1
+                            continue
 
         T = int(d['joint_pos'].shape[0])
         cmd_orig = d['cmd_const'].astype(np.float32)
@@ -325,7 +379,8 @@ def main():
     git_sha, git_dirty = _git_info(REPO_ROOT)
     recipe = {
         'created':            datetime.datetime.now().isoformat(timespec='seconds'),
-        'input':              str(in_root.relative_to(REPO_ROOT)) if str(in_root).startswith(str(REPO_ROOT)) else str(in_root),
+        'input':              [str(r.relative_to(REPO_ROOT)) if str(r).startswith(str(REPO_ROOT)) else str(r)
+                                for r in in_roots],
         'git_commit':         git_sha,
         'git_dirty':          git_dirty,
         'args': {

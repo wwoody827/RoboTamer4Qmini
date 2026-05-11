@@ -935,8 +935,14 @@ def main():
     elif args.grid == 'yaw':
         vx_list, vy_list, yaw_list = [0.0], [0.0], [-1.0, -0.5, 0.0, 0.5, 1.0]
     elif args.grid == 'omni':
-        # Compact omnidirectional grid covering vx/vy/yaw individually + a few combos.
+        # In-distribution grid matching pure_and_pairs training regime:
+        # pure_vx / pure_vy / pure_yaw / vx+vy / vx+yaw. No 3-axis or vy+yaw
+        # (env never trains those — testing them yields meaningless results).
+        # The full Cartesian product below INCLUDES OOD combos; report_only
+        # / downstream code is expected to filter to ID cmds before scoring.
         vx_list, vy_list, yaw_list = [-0.3, 0.0, 0.3, 0.5], [-0.3, 0.0, 0.3], [-0.5, 0.0, 0.5]
+        print('[evaluate] WARNING: omni grid includes OOD 3-axis combos; filter '
+              'downstream (vy+yaw and 3-axis are not in training distribution).')
     else:
         parser.error(f"Unknown --grid {args.grid!r}; pick from vx|vy|yaw|omni")
 

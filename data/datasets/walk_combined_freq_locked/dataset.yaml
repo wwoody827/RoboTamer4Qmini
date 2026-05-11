@@ -1,0 +1,39 @@
+created: '2026-05-10T17:52:39'
+input:
+- data/traces/walk_v34_multi
+- data/traces/walk_v34_multifreq
+- data/traces/walk_v34_multifric
+- data/traces/walk_v38_multi
+- data/traces/walk_v38_multifreq
+git_commit: a7b1be9c8422f9c062e5243fdf4e67cb44fd9f78
+git_dirty: true
+args:
+  include: clean
+  relabel: cmd_axes
+  drift_thresh_vx: 0.05
+  drift_thresh_vy: 0.2
+  drift_thresh_yaw: 0.2
+  cmd_active_thresh: 0.05
+  deadzone: 0.02
+counts:
+  clean: 1399
+  drift: 183
+  failure: 87
+  kept: 437
+  invalid: 0
+  low_eff: 481
+  ood_cmd: 312
+  freq_unlock: 19
+  high_yaw_drift: 93
+  high_tilt: 55
+  high_torque: 2
+total_frames: 340860
+meta:
+  phase_mode: input
+  action_mode: absolute
+  action_dim: 10
+  obs_dim: 43
+  obs_history: 5
+  obs_skip: 2
+  lp_alpha: 0.75
+  num_legs: 2

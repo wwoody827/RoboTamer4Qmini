@@ -61,19 +61,21 @@ def _git_info(repo_root):
 
 
 def default_grid():
-    """27 grid combos + 4 extras."""
-    grid = list(product(
-        [-0.3, 0.3, 0.5],   # vx
-        [-0.3, 0.0, 0.3],   # vy
-        [-0.5, 0.0, 0.5],   # yaw
-    ))
+    """In-distribution grid — matches training regime (pure_and_pairs):
+       pure_vx / pure_vy / pure_yaw / vx+vy / vx+yaw. NO 3-axis or vy+yaw
+       (env never trains those, recording them produces low-quality demos)."""
+    pure_vx = [(v, 0, 0) for v in (-0.3, 0.3, 0.5)]
+    pure_vy = [(0, v, 0) for v in (-0.3, 0.3)]
+    pure_yaw = [(0, 0, v) for v in (-0.5, 0.5)]
+    vx_vy  = [(vx, vy, 0) for vx in (-0.3, 0.3, 0.5) for vy in (-0.3, 0.3)]
+    vx_yaw = [(vx, 0, yw) for vx in (-0.3, 0.3, 0.5) for yw in (-0.5, 0.5)]
     extras = [
-        (0.0, 0.0, 0.0),     # stand
-        (0.0, 0.0, 1.0),     # pure_yaw_R
-        (0.0, 0.0, -1.0),    # pure_yaw_L
-        (0.7, 0.0, 0.0),     # fast_fwd
+        (0.0, 0.0, 0.0),    # stand
+        (0.0, 0.0, 1.0),    # pure_yaw_R extreme
+        (0.0, 0.0, -1.0),   # pure_yaw_L extreme
+        (0.7, 0.0, 0.0),    # fast_fwd
     ]
-    return grid + extras
+    return pure_vx + pure_vy + pure_yaw + vx_vy + vx_yaw + extras
 
 
 def cmd_id(vx, vy, yaw):
