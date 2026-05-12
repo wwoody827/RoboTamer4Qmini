@@ -4,8 +4,10 @@ import rl
 
 
 class Actor(rl.ContinuousActor):
-    def __init__(self, num_observations: int, num_actions: int, hidden_layers: Tuple[int, ...], activation: str, device: str = 'cpu', deploy=False, **kwargs):
-        super(Actor, self).__init__(num_observations, num_actions, hidden_layers, activation, deploy=deploy)
+    def __init__(self, num_observations: int, num_actions: int, hidden_layers: Tuple[int, ...], activation: str,
+                 init_noise_std: float = 0.8, device: str = 'cpu', deploy=False, **kwargs):
+        super(Actor, self).__init__(num_observations, num_actions, hidden_layers, activation,
+                                    init_noise_std=init_noise_std, deploy=deploy)
         self.device = device
 
 

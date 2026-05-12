@@ -1,0 +1,110 @@
+# walk_bdxr.yaml — faithful reproduction of BDX-R-MjLab's training recipe.
+#
+# Source: github.com/BDX-R/BDX-R-MjLab — Disney BDX-R bipedal running on mjlab
+# (Isaac Lab API + MjWarp MuJoCo backend). Key design choices we replicate:
+#
+#   • NO phase clock in observation — gait emerges purely from reward shape.
+#   • Asymmetric actor-critic (already in our codebase, no change needed).
+#   • Speed-conditional `pose` reward — tight std at standstill (forces ref
+#     joint pose), loose during walking (allows leg swing).
+#   • Positive-bell `upright` reward — exp(-||g_xy||²/σ²), softer than L2.
+#   • Peak-tracking `feet_swing_height` reward — sparse at first_contact,
+#     forces measured demonstration of clearance per stride.
+#   • `soft_landing` penalty — minimises contact force at touchdown.
+#
+# Everything walk_rl had that BDX-R-MjLab does NOT use is turned off here.
+#
+# Action: absolute, 10 dim (joints only). Obs: 6 slots × 5 frames × skip 2 =
+# 190 dim (NO phase_clock, NO phase_freq_cmd).
+#
+# Note this is independent of v9's "BDX-R-inspired-but-still-walk_rl" recipe
+# — v9 keeps foot_phase, foot_stand, base_heit, and walk_rl tracking. This
+# config drops them all to faithfully match BDX-R-MjLab's set.
+
+_base: walk_rl.yaml
+
+phase:
+  mode: none                # NO phase clock in obs
+
+observation:
+  # 6 slots × 5 frames × skip 2 = 190 dim. Drops phase_clock + phase_freq_cmd.
+  slots:
+    - commands_3
+    - base_euler
+    - base_ang_vel
+    - joint_pos_err
+    - joint_vel
+    - joint_tracking_err
+
+reward:
+  # ── BDX-R-MjLab reward terms ─────────────────────────────────────────
+  fwd_vel:       2.0        # track_linear_velocity equivalent
+  lateral_vel:   2.0        # vy component (BDX-R bundles into track_lin_vel)
+  yaw_rat:       2.0        # track_angular_velocity equivalent
+  upright:       1.5        # exp(-||g_xy||²/σ²) bell, σ from upright_std
+  upright_std:   0.4
+  pose_speed:    1.0        # exp(-mean((j-ref)²/σ²)) with speed-cond σ
+  pose_std_standing: 0.15   # tight @ stand → forces upright posture
+  pose_std_walking:  0.45   # loose @ walk → allows leg swing
+  pose_std_running:  0.80
+  pose_walking_threshold: 0.3
+  pose_running_threshold: 1.5
+
+  feet_swing_height_peak: 1.0   # peak-tracking — fires at touchdown
+  feet_swing_target:      0.08  # 8 cm peak per stride
+
+  soft_landing:  2.0e-5     # × foot_frc at touchdown (matches BDX-R weight)
+
+  # Existing regulators kept (BDX-R uses similar names):
+  act_smo:       0.30       # ~ action_rate_l2 / dof_acc
+  jnt_vel:       0.001
+  joint_tor:     0.0001
+  foot_slip:     0.20
+
+  # ── Turn off everything BDX-R does NOT use ───────────────────────────
+  base_heit:        0.0     # BDX-R uses height_scan via critic instead
+  base_heit_l2:     0.0
+  flat_orient_l2:   0.0     # replaced by upright bell
+  foot_phase:       0.0     # NO clock-based phase reward
+  foot_clr:         0.0     # replaced by feet_swing_height_peak
+  foot_supt:        0.0     # implicit via gait emergence
+  foot_heit:        0.0     # replaced by peak-tracking version
+  foot_heit_form:   clip
+  foot_clearance_l2: 0.0
+  foot_stand:       0.0     # not in BDX-R; gait emerges from speed-conditioned pose
+  air_time:         0.0     # 0.0 in BDX-R config (overrideable)
+  balance:          0.0     # subsumed by upright + pose_speed
+  twist:            0.0
+  vertical_vel:     0.0
+  ang_vel:          0.0
+  base_acc:         0.0
+  leg_width_rew:    0.0
+  feet_py:          0.0
+  jnt_pos_err:      0.0     # replaced by stronger pose_speed
+  act_const:        0.0     # subsumed by pose_speed
+  sa_const:         0.0
+  power:            0.0     # BDX-R doesn't use, relies on action_rate
+  pmf:              0.0
+  heading:          0.0
+  yaw_smooth:       0.0
+  foot_sft:         0.0
+  foot_vz:          0.0
+  foot_acc:         0.0
+  feet_frc:         0.0
+  net_smo:          0.0
+  net_out_val:      0.0
+
+  # Tracking shape — use existing linear shape but no LP filter (BDX-R uses
+  # direct error). Set lp_alpha to 0 to disable the EMA smoothing.
+  cmd_track_lp_alpha: 0.0
+  reg_use_norm_scaling: false
+
+  # Command-magnitude gating thresholds (foot rewards inactive at stand)
+  fwd_err_slope:      3.0
+  lateral_err_slope:  3.0
+  yaw_err_slope:      3.0
+
+domain_rand:
+  delay_joint_ranges: [1, 50]    # wider than walk_rl's [10, 40] — see v4
+  delay_angle_ranges: [1, 60]
+  delay_rate_ranges:  [1, 60]

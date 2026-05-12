@@ -1,0 +1,69 @@
+# walk_rl_v9 — BDX-R-MjLab style speed-conditional pose + upright rewards.
+#
+# Diagnosis from v8: phase-clock-gated L2 foot height fixed the v7 shuffle
+# (stride climbed to 0.107 m), but the policy adopted a violent body-swing
+# strategy to "throw" the foot up to target height — pitch_rms 15-26°
+# during walk and stand. The L2 penalty was hard enough to force foot
+# clearance but didn't constrain HOW the foot got there.
+#
+# BDX-R-MjLab (Disney BDX-R running on mjlab) uses two rewards we don't:
+#
+# 1. `pose` reward with SPEED-CONDITIONAL std:
+#      err² = (joint_pos - ref_joint_pos)²
+#      std  = std_standing  if speed < walking_thresh
+#           + std_walking   if walking_thresh ≤ speed < running_thresh
+#           + std_running   if speed ≥ running_thresh
+#      reward = exp(-mean(err² / std²))      ← positive bell, in [0, 1]
+#    Tight std at stand → forces joint_pos ≈ ref_joint_pos (upright posture
+#    at 0.45 m height that ref_joint_pos was designed for). Loose std during
+#    walking → allows necessary leg swing without being penalized.
+#    Our existing `jnt_pos_err` weight 0.02 is uniform and too weak to
+#    matter at stand. This replaces it with a much stronger, speed-aware version.
+#
+# 2. `upright` reward — positive bell on body tilt:
+#      reward = exp(-||projected_gravity_xy||² / std²)
+#    Softer than v5/v6's flat_orient_l2 (-5 × ||g_xy||²). Positive in [0, 1].
+#    Stable to train against — doesn't dominate other rewards by going to -∞.
+#
+# Carry-overs from prior runs:
+#   foot_stand: 1.0          (from v2 — standstill double-support reward)
+#   base_heit:  3.0          (from v3 — bell weight bumped)
+#   delay DR [1, 50] / [1, 60] / [1, 60]   (from v4)
+#
+# Disabled/turned off:
+#   foot_heit_form: clip     (back to legacy clip — pose_speed handles upright)
+#   foot_clearance_l2: 0     (v7 velocity gate was gameable, off)
+#   flat_orient_l2:    0     (replaced by softer upright bell)
+#
+# Training: fresh 5000 iter. Watching:
+#   • com_z stand should climb toward 0.45 m (pose reward forcing joint ≈ ref)
+#   • pitch_rms walk should drop below 5° (no more body-swing strategy)
+#   • stride_length normal (0.10-0.14 m at cmd 0.3), duty close to 0.50
+
+_base: walk_rl.yaml
+
+reward:
+  # New BDX-R-MjLab inspired rewards
+  pose_speed:           2.0      # exp bell on speed-conditional pose err
+  pose_std_standing:    0.15     # tight at standstill — forces ref pose
+  pose_std_walking:     0.45     # looser during walking — allows leg swing
+  pose_std_running:     0.80     # very loose at running speeds
+  pose_walking_threshold: 0.3    # ||cmd_xy|| + |cmd_yaw| < 0.3 → standing
+  pose_running_threshold: 1.5    # ≥ 1.5 → running (we never reach here)
+
+  upright:              1.5      # exp bell on projected_gravity_xy
+  upright_std:          0.4      # std for upright bell
+
+  # Carry-overs
+  foot_stand:   1.0
+  base_heit:    3.0
+
+  # Disable failed v7/v8 experiments
+  foot_clearance_l2: 0.0
+  flat_orient_l2:    0.0
+  foot_heit_form:   clip       # back to legacy clip-saturated (5cm cap)
+
+domain_rand:
+  delay_joint_ranges: [1, 50]
+  delay_angle_ranges: [1, 60]
+  delay_rate_ranges:  [1, 60]

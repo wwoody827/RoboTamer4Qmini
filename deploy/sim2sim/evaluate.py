@@ -73,11 +73,13 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
     action_mode = cfg.get('action_mode', 'increment')
     lp_alpha    = cfg.get('action_lowpass_alpha', 1.0)
     # obs_per_step=38 = "no-clock-in-obs" layout: 6 plain slots, no phase, no ref.
+    # obs_per_step=39 = BDX-R layout: projected_gravity (3) replaces base_euler (2).
     # Used by walk_noclock (phase.mode=none) AND walk_noclock_v3 (phase.mode=input
     # but the phase slots are intentionally absent from obs — Cassie-style).
+    is_bdxr     = (obs_dim == 39)
     is_noclock  = (obs_dim == 38)
-    is_mirl     = (phase_mode == 'none' and not is_noclock)
-    is_bdx      = (phase_mode == 'input' and not is_noclock)
+    is_mirl     = (phase_mode == 'none' and not is_noclock and not is_bdxr)
+    is_bdx      = (phase_mode == 'input' and not is_noclock and not is_bdxr)
 
     commands    = np.array([cmd_vx, cmd_vy, cmd_yaw], dtype=np.float32)
     static_flag = float(np.linalg.norm(commands) >= static_thr)
@@ -249,6 +251,26 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
         ]).astype(np.float32)
         return np.clip(obs, -3.0, 3.0)
 
+    def get_obs_bdxr():
+        """walk_bdxr obs: 39-dim — base_euler swapped for projected_gravity (3-dim).
+        Slot order: commands_3, base_ang_vel, projected_gravity,
+        joint_pos_err, joint_vel, joint_tracking_err."""
+        q, dq, _, base_ang_vel = _delayed()
+        # Compute projected gravity from current quat (not delayed — matches
+        # training side where projected_gravity is fresh, no delay applied).
+        quat, _ = _imu_state()
+        gravity_world = np.array([0.0, 0.0, -1.0], dtype=np.float32)
+        proj_grav = quat_rotate_inverse(quat, gravity_world).astype(np.float32)
+        obs = np.concatenate([
+            commands,                # 3
+            base_ang_vel * 0.5,      # 3   (note: BDX-R order, ang_vel BEFORE projected_gravity per our yaml)
+            proj_grav,               # 3
+            q - ref_joint,           # 10
+            dq * 0.1,                # 10
+            current_joint_act - q,   # 10
+        ]).astype(np.float32)
+        return np.clip(obs, -3.0, 3.0)
+
     def get_obs_bdx():
         """BD_X obs: 43-dim with external phase clock + normalized freq cmd."""
         q, dq, base_euler, base_ang_vel = _delayed()
@@ -312,6 +334,8 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
             if is_bdx:
                 ext_clock.update(cmd_freq)
                 obs_now = get_obs_bdx()
+            elif is_bdxr:
+                obs_now = get_obs_bdxr()
             elif is_noclock:
                 obs_now = get_obs_noclock()
             elif is_mirl:
@@ -817,9 +841,14 @@ def make_plots(csv_path):
 
 def quick_eval(onnx_path, sim_cfg,
                frictions=(1.0, 1.5),
-               vx_list=(-0.5, 0.0, 0.5),
-               vy_list=(-0.3, 0.3),
-               yaw_list=(0.0, 0.5, -0.5),
+               # Test grid narrowed (2026-05-11) to stay within BDX-R stage-0
+               # training distribution (lin_x ±0.4, lin_y ±0.1, yaw ±0.3).
+               # walk_v34 / walk_rl_v4 / walk_noclock all also include these
+               # narrower ranges in their training distribution, so this
+               # change is universally in-distribution.
+               vx_list=(-0.3, 0.0, 0.3),
+               vy_list=(-0.1, 0.1),
+               yaw_list=(0.0, 0.3, -0.3),
                runs=10,
                duration=15.0):
     """

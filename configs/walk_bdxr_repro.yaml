@@ -1,0 +1,198 @@
+# walk_bdxr_repro.yaml — faithful BDX-R-MjLab reproduction per docs/bdxr_reproduction.md.
+#
+# This config + the code changes that landed alongside it implement the BDX-R
+# legs variant as closely as Qmini's hardware allows. See §11 of the doc for
+# the implementation checklist and §12 for items needing new code.
+#
+# Known deviations (documented in §10 of the doc):
+#   • Policy rate 66.67 Hz (Qmini) vs 50 Hz (BDX-R)
+#   • Action: URDF limits + LP filter 0.75 (Qmini hardware match) vs
+#     `scale = 0.25 × effort/kp` + delayed actuator (BDX-R hardware)
+#   • Default joint pose: squat (Qmini ref_joint_pos) vs straight (BDX-R)
+#   • Tracking reward shape: linear `1 - clip(α·|err|)` (ours) vs gaussian
+#     `exp(-err²/std²)` (BDX-R). Magnitudes match (weight 2.0 total) — shape
+#     is a deferred TODO.
+#   • `air_time` reward: held-value (ours) vs per-step in-range count (BDX-R).
+#     Same intent (target air-time around 0.1-0.6 s window). Deferred TODO.
+#   • Skipped for first pass: encoder_bias DR, base_com DR, cmd_vel
+#     curriculum, heading_command mode (30% envs). Each can be added later.
+
+_base: walk_rl.yaml
+
+task:
+  cfg: BDXR                      # use BDXRTask registry
+  tilt_termination_angle: 1.22   # BDX-R: 70° = 1.22 rad
+
+phase:
+  mode: none                     # NO phase clock in obs
+
+observation:
+  history: 5
+  skip: 2
+  # 6 slots × 5 frames = 195 dim. Includes projected_gravity (3-dim) per
+  # BDX-R, replacing our usual base_euler (2-dim).
+  slots:
+    - commands_3
+    - base_ang_vel
+    - projected_gravity
+    - joint_pos_err
+    - joint_vel
+    - joint_tracking_err
+
+action:
+  # Hardware-aware (Qmini): URDF limits + LP filter 0.75. BDX-R uses
+  # scale × default offset semantics with their hardware's effort/kp values.
+  # Different mechanism, same effect: per-step Δq_target ≤ ~0.15 rad.
+  action_mode: absolute
+  action_lowpass_alpha: 0.75
+  abs_low_ranges: null
+  abs_high_ranges: null
+  ref_joint_pos: [0.4, -0.1, -1.5, 1.0, -1.3,
+                  -0.4, 0.1, 1.5, -1.0, 1.3]
+
+policy:
+  hidden_layers: [512, 256, 128]   # BDX-R 3-layer MLP
+  activation: elu                  # BDX-R activation
+  init_noise_std: 1.0              # BDX-R init exploration std
+
+algorithm:
+  value_loss_coef: 1.0
+  use_clipped_value_loss: true
+  eps_clip: 0.2                    # = BDX-R clip_param
+  entropy_coef: 0.003              # Reduced from BDX-R's 0.01 (single-variable
+                                   # rollback after first-pass training stalled
+                                   # at sim2sim 0.4-0.7 s through iter 800 —
+                                   # BDX-R's high entropy needs their high kd
+                                   # damping which Qmini lacks). Still 6× our
+                                   # legacy walk_rl default (0.0005).
+  num_learning_epochs: 5           # BDX-R (was 3)
+  num_mini_batches: 4
+  learning_rate: 1.0e-3
+  schedule: adaptive
+  discount_factor: 0.99            # BDX-R gamma (was 0.995)
+  gae_lambda: 0.95                 # = BDX-R lam
+  desired_kl: 0.01
+  max_grad_norm: 1.0
+  normalize_value: true
+
+command:
+  resampling_time: 5.0             # midpoint of BDX-R's 3-8 s (no per-env range yet)
+  heading_command: false           # TODO §12: heading-controlled subset
+  use_heading_reward: false
+  # Stage 0 of BDX-R's command curriculum (narrow ranges for early training).
+  # Full curriculum would expand to ±0.7/±0.25/±0.6 at iter 5000 then
+  # ±1.0/±0.4/±1.0 at iter 10000. For now we use stage 0 throughout —
+  # produces a "slow walker" specialist; cmd_vel curriculum is a TODO.
+  lin_vel_x_range:   [-0.4, 0.4]
+  lin_vel_y_range:   [-0.1, 0.1]
+  ang_vel_yaw_range: [-0.3, 0.3]
+  regime: null                     # uniform — no pure_and_pairs
+
+reward:
+  # ── BDX-R tracking (split across our fwd_vel + lateral_vel) ─────────────
+  fwd_vel:        1.0              # half of track_lin_vel weight 2.0
+  lateral_vel:    1.0              # other half
+  yaw_rat:        2.0              # = track_ang_vel weight
+  fwd_err_slope:      3.0
+  lateral_err_slope:  3.0
+  yaw_err_slope:      3.0
+  cmd_track_lp_alpha: 0.0          # OFF — BDX-R uses direct error
+  reg_use_norm_scaling: false
+
+  # ── BDX-R posture set ─────────────────────────────────────────────────
+  upright:        1.5              # = BDX-R weight
+  upright_std:    0.316            # = √0.1 (BDX-R exact)
+  pose_speed:     1.0              # = BDX-R `pose` weight
+  pose_walking_threshold: 0.05     # BDX-R exact
+  pose_running_threshold: 0.10     # BDX-R exact
+  # Per-joint std (BDX-R legs variant, 10 joints in our left-then-right order):
+  pose_std_per_joint_standing:
+    [0.05, 0.05, 0.05, 0.05, 0.05,
+     0.05, 0.05, 0.05, 0.05, 0.05]
+  pose_std_per_joint_walking:
+    [0.15, 0.04, 0.50, 0.50, 0.10,
+     0.15, 0.04, 0.50, 0.50, 0.10]
+  pose_std_per_joint_running:
+    [0.20, 0.04, 0.80, 0.80, 0.50,
+     0.20, 0.04, 0.80, 0.80, 0.50]
+
+  # ── BDX-R penalty terms (legs override weights) ───────────────────────
+  body_ang_vel:       0.2          # × −1 in code (= BDX-R legs −0.2)
+  angular_momentum:   0.04         # × −1 in code (= BDX-R legs −0.04)
+  dof_pos_limits:     1.0          # × −1 in code (= BDX-R −1.0)
+  action_rate_l2:     0.1          # × −1 in code (= BDX-R −0.1)
+
+  # ── Foot rewards (BDX-R legs override weights) ────────────────────────
+  air_time:                1.5     # = BDX-R legs override (still uses our impl)
+  feet_clearance_l1:       4.0     # NEW L1 form (= BDX-R legs −4.0)
+  feet_clearance_target:   0.06    # = BDX-R exact
+  feet_clearance_cmd_threshold: 0.05
+  feet_swing_height_peak:  3.0     # peak-tracking (= BDX-R legs −3.0)
+  feet_swing_target:       0.06    # = BDX-R exact
+  feet_slip_l2:            0.2     # NEW L2 form (= BDX-R −0.2)
+  feet_slip_cmd_threshold: 0.01    # = BDX-R exact (lower than other foot rewards)
+  soft_landing:            2.0e-5  # = BDX-R exact
+
+  # ── Everything else OFF (BDX-R does NOT have these) ───────────────────
+  base_heit:        0.0
+  base_heit_l2:     0.0
+  flat_orient_l2:   0.0
+  foot_phase:       0.0
+  foot_clr:         0.0
+  foot_supt:        0.0
+  foot_heit:        0.0
+  foot_heit_form:   clip
+  foot_clearance_l2: 0.0           # OFF — replaced by feet_clearance_l1
+  foot_stand:       0.0
+  balance:          0.0
+  twist:            0.0
+  vertical_vel:     0.0
+  ang_vel:          0.0
+  base_acc:         0.0
+  leg_width_rew:    0.0
+  feet_py:          0.0
+  jnt_pos_err:      0.0
+  act_const:        0.0
+  sa_const:         0.0
+  power:            0.0
+  act_smo:          0.0
+  jnt_vel:          0.0
+  joint_tor:        0.0
+  pmf:              0.0
+  heading:          0.0
+  yaw_smooth:       0.0
+  foot_sft:         0.0
+  foot_vz:          0.0
+  foot_acc:         0.0
+  feet_frc:         0.0
+  net_smo:          0.0
+  net_out_val:      0.0
+  constant:         0.0
+
+  component_clip_min: -4.0
+  component_clip_max:  5.0
+
+# ── DR matching BDX-R ranges ────────────────────────────────────────────
+domain_rand:
+  randomize_friction: true
+  friction_range: [0.3, 1.2]       # = BDX-R foot_friction
+  rest_offset_range: [0.0, 0.0]
+  randomize_mass: true
+  added_mass_range: [0.8, 1.3]     # = BDX-R body_mass scale
+  added_inertia_range: [0.8, 1.3]
+  randomize_damping: true
+  added_friction_range: [0.8, 1.3]
+  added_damping_range:  [0.7, 1.3]
+  randomize_torque: false
+  torque_range: [1.0, 1.0]
+  torque_noise_std: 0.0
+  randomize_gains: true
+  gains_range: [0.7, 1.3]          # = BDX-R pd_gains
+  push_robots: true
+  max_push_vel_xy: 0.5             # = BDX-R x/y ±0.5
+  max_push_rate_xyz: 0.78          # = BDX-R yaw ±0.78
+  push_interval_s: 2.0             # = midpoint of BDX-R 1-3 s
+  delay_observation: true
+  delay_joint_ranges: [1, 50]
+  delay_angle_ranges: [1, 60]
+  delay_rate_ranges:  [1, 60]

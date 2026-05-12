@@ -223,6 +223,11 @@ class BIRLTask(NullTask):
         self._td_event = torch.zeros(self.num_envs, self.num_legs, dtype=torch.bool, device=self.device)
         self._held_air_delta = torch.zeros(self.num_envs, self.num_legs, dtype=torch.float, device=self.device)
 
+        # BDX-R-MjLab style peak-tracking foot swing height: holds the max
+        # foot height reached during the current swing per leg. Sparse
+        # reward fires at touchdown (=`_td_event`) for (peak/target - 1)².
+        self._foot_peak_z = torch.zeros(self.num_envs, self.num_legs, dtype=torch.float, device=self.device)
+
         # --- Reference clip state (populated by _load_ref_clips if paths provided) ---
         self._has_ref = False
         self._ref_joint_pos_now = torch.zeros(self.num_envs, 10, dtype=torch.float, device=self.device)
@@ -700,6 +705,7 @@ class BIRLTask(NullTask):
 
         # Air time reset
         self.foot_air_time[env_ids] = 0.0
+        self._foot_peak_z[env_ids] = 0.0
         self._held_air_delta[env_ids] = 0.0
         self._td_event[env_ids] = False
         self._td_swing_duration[env_ids] = 0.0
@@ -922,8 +928,12 @@ class BIRLTask(NullTask):
 
     def terminate(self):
         time_out = torch.unsqueeze(self.env.time_out_buf, 1)
-        twist_over = torch.abs(self.env.base_euler[:, [0]]) > 0.7
-        twist_over |= torch.abs(self.env.base_euler[:, [1]]) > 0.7
+        # Tilt termination angle (radians). Default 0.7 (≈40°) matches the
+        # legacy walk_v34 setting. BDX-R-MjLab uses 70° = 1.22 rad. Set via
+        # `task.tilt_termination_angle` in config.
+        _tilt_lim = float(getattr(self.cfg.task, 'tilt_termination_angle', 0.7) or 0.7)
+        twist_over = torch.abs(self.env.base_euler[:, [0]]) > _tilt_lim
+        twist_over |= torch.abs(self.env.base_euler[:, [1]]) > _tilt_lim
 
         pos_over = self.env.base_pos_hd[:, [2]] < 0.2
 
@@ -979,6 +989,134 @@ class BIRLTask(NullTask):
         flat_orient_l2 = -torch.sum(
             self.env.projected_gravity[:, :2] ** 2, dim=-1, keepdim=True
         )   # ≤ 0
+
+        # BDX-R-MjLab style: positive bell on upright = exp(-||g_xy||² / σ²).
+        # Softer than the L2 penalty above. Maxes at 1.0 (perfect upright),
+        # decays to 0 as the body tilts. Good for stable training.
+        _upright_std = float(getattr(self.cfg.reward, 'upright_std', 0.4) or 0.4)
+        upright_rew = torch.exp(
+            -torch.sum(self.env.projected_gravity[:, :2] ** 2, dim=-1, keepdim=True)
+            / (_upright_std ** 2)
+        )                                                              # [0, 1]
+
+        # BDX-R-MjLab style: speed-conditional pose deviation reward.
+        # std varies with commanded speed — TIGHT at stand (forces joint_pos
+        # ≈ ref_joint_pos = upright pose), LOOSE during walk (allows legs to
+        # swing without being penalized for deviation). Solves our recurring
+        # "policy walks crouched because jnt_pos_err weight=0.02 too weak at
+        # stand AND too restrictive during walk" issue.
+        _ps_std_stand = float(getattr(self.cfg.reward, 'pose_std_standing', 0.15) or 0.15)
+        _ps_std_walk  = float(getattr(self.cfg.reward, 'pose_std_walking',  0.45) or 0.45)
+        _ps_std_run   = float(getattr(self.cfg.reward, 'pose_std_running',  0.80) or 0.80)
+        _ps_walk_thr  = float(getattr(self.cfg.reward, 'pose_walking_threshold', 0.5) or 0.5)
+        _ps_run_thr   = float(getattr(self.cfg.reward, 'pose_running_threshold', 1.5) or 1.5)
+        # Total commanded speed (lin xy magnitude + |yaw_rate|).
+        _cmd_speed = (torch.linalg.norm(self.commands[:, :2], dim=-1)
+                      + torch.abs(self.commands[:, 2])).unsqueeze(-1)    # [n, 1]
+        _ps_std = (
+            _ps_std_stand * (_cmd_speed < _ps_walk_thr).float()
+            + _ps_std_walk * ((_cmd_speed >= _ps_walk_thr) & (_cmd_speed < _ps_run_thr)).float()
+            + _ps_std_run  * (_cmd_speed >= _ps_run_thr).float()
+        )                                                                # [n, 1]
+        _pose_err_sq = (self.env.joint_pos - self.ref_joint_action) ** 2   # [n, J]
+        # Per-joint std support (BDX-R-MjLab uses dict {joint_pattern: std}).
+        # When `pose_std_walking_per_joint` (and friends) is a list of J floats,
+        # each joint gets its own σ — hip_pitch/knee can have loose σ while
+        # hip_roll/hip_yaw stay tight. Same shape as joint dim.
+        _ps_per_joint = getattr(self.cfg.reward, 'pose_std_per_joint_walking', None)
+        if _ps_per_joint is not None:
+            # Compile per-joint stds for stand / walk / run.
+            _per_stand = to_torch(
+                self.cfg.reward.pose_std_per_joint_standing, device=self.device
+            )                                                            # [J]
+            _per_walk  = to_torch(
+                self.cfg.reward.pose_std_per_joint_walking, device=self.device
+            )                                                            # [J]
+            _per_run   = to_torch(
+                self.cfg.reward.pose_std_per_joint_running, device=self.device
+            )                                                            # [J]
+            # Select per-env std vector based on cmd_speed.
+            _stand_mask = (_cmd_speed < _ps_walk_thr).float()             # [n, 1]
+            _walk_mask  = ((_cmd_speed >= _ps_walk_thr) & (_cmd_speed < _ps_run_thr)).float()
+            _run_mask   = (_cmd_speed >= _ps_run_thr).float()
+            _ps_std_pj = (
+                _stand_mask * _per_stand.unsqueeze(0)
+                + _walk_mask * _per_walk.unsqueeze(0)
+                + _run_mask  * _per_run.unsqueeze(0)
+            )                                                            # [n, J]
+            pose_speed_rew = torch.exp(
+                -torch.mean(_pose_err_sq / (_ps_std_pj ** 2), dim=-1, keepdim=True)
+            )                                                            # [n, 1] in [0, 1]
+        else:
+            pose_speed_rew = torch.exp(
+                -torch.mean(_pose_err_sq / (_ps_std ** 2), dim=-1, keepdim=True)
+            )                                                            # [n, 1] in [0, 1]
+
+        # BDX-R-MjLab style additional reward terms.
+        #
+        # `action_rate_l2`: ||action_t − action_{t-1}||²  — first-derivative
+        # penalty on raw net_out. Our existing `act_smo` is 2nd-derivative
+        # which is similar but not identical.  net_out_history holds the
+        # raw policy outputs (joint-only part for non-output phase modes).
+        if len(self.net_out_history) >= 2:
+            _act_rate_l2 = -torch.sum(
+                (self.net_out_history[-1] - self.net_out_history[-2]) ** 2,
+                dim=-1, keepdim=True,
+            )                                                            # ≤ 0
+        else:
+            _act_rate_l2 = torch.zeros(self.num_envs, 1, device=self.device)
+        action_rate_l2 = _act_rate_l2
+
+        # `body_ang_vel`: penalise base xy angular velocity (roll/pitch rate).
+        # Sum of squares. BDX-R weight −0.05 (full body) or −0.2 (legs).
+        body_ang_vel = -torch.sum(
+            self.env.base_ang_vel[:, :2] ** 2, dim=-1, keepdim=True
+        )                                                                # ≤ 0
+
+        # BDX-R `angular_momentum_penalty`: ||body angular momentum||².
+        # We don't compute true whole-body angular momentum (mjlab uses
+        # MuJoCo's built-in `root_angmom` sensor). As a proxy use ||ω_base||²
+        # weighted by body mass — same scaling intent (penalise rotational
+        # motion of the whole robot). For our use this is approximately
+        # the same signal since most rotational momentum is base rotation
+        # for a biped (legs cancel out at gait midpoint).
+        angular_momentum = -torch.sum(
+            self.env.base_ang_vel ** 2, dim=-1, keepdim=True
+        )                                                                # ≤ 0
+
+        # ── Shared helpers used by BDX-R-style foot rewards below ──────────
+        # `cmd_total` is `||cmd_xy|| + |cmd_yaw|` per BDX-R; used by every
+        # foot reward's "cmd_active" gate. `foot_xy_vel` is per-foot
+        # horizontal speed.
+        _cmd_total = (torch.linalg.norm(self.commands[:, :2], dim=-1)
+                      + torch.abs(self.commands[:, 2])).unsqueeze(-1)    # [n, 1]
+        _foot_xy_vel = torch.stack([
+            torch.linalg.norm(self.env.foot_vel[:, 0:2], dim=-1),
+            torch.linalg.norm(self.env.foot_vel[:, 3:5], dim=-1),
+        ], dim=-1)                                                       # [n, 2]
+
+        # BDX-R `feet_slip`: Σ ||v_xy(foot)||² × in_contact × cmd_active.
+        # cmd threshold for slip is 0.01 (lower than other foot rewards' 0.05).
+        _slip_cmd_threshold = float(getattr(self.cfg.reward, 'feet_slip_cmd_threshold', 0.01) or 0.01)
+        _cmd_active_slip = (_cmd_total > _slip_cmd_threshold).float()
+        _in_contact_f = (self.env.foot_frc >= 1.0).float()               # [n, num_legs]
+        feet_slip_l2 = -torch.sum(
+            (_foot_xy_vel ** 2) * _in_contact_f, dim=-1, keepdim=True
+        ) * _cmd_active_slip                                             # ≤ 0
+
+        # `dof_pos_limits`: hinge-style penalty for joint position near limits.
+        # Standard legged_gym formulation: distance past a soft limit (95% of
+        # range) gets penalised quadratically. Bounded to keep the penalty
+        # well-behaved.
+        if hasattr(self.env, 'dof_pos_limits'):
+            _q = self.env.joint_pos                                       # [n, J]
+            _q_low = self.env.dof_pos_limits[:, 0].unsqueeze(0)           # [1, J]
+            _q_high = self.env.dof_pos_limits[:, 1].unsqueeze(0)
+            _below = (_q_low - _q).clip(min=0.)
+            _above = (_q - _q_high).clip(min=0.)
+            dof_pos_limits = -torch.sum(_below + _above, dim=-1, keepdim=True)
+        else:
+            dof_pos_limits = torch.zeros(self.num_envs, 1, device=self.device)
 
         balance_rew = 0.5 * (base_heit_rew * torch.exp(-torch.clip(5. / lin_vel_x_norm, min=2, max=8.) * torch.norm(self.env.base_euler[:, :2], dim=-1, keepdim=True)) + 1.)
 
@@ -1045,12 +1183,39 @@ class BIRLTask(NullTask):
         foot_support_rew *= self.static_flag
         foot_clear_rew *= self.static_flag
 
-        foot_heit_score = 40. * torch.clip(self.foot_height, min=0.0, max=0.05)
-        foot_height_rew = torch.sum(self.foot_swing_mask * foot_heit_score, dim=1,keepdim=True).clip(max=2.) * self.static_flag
+        # Two formulations of foot height reward, selected by config:
+        #
+        # 'clip'  (legacy, default for walk_v34 lineage):
+        #   reward = sum(swing_mask × 40 × clip(z, 0, 0.05)).clip(max=2)
+        #   Caps reward at 5 cm — once foot is at 5 cm no extra reward to go
+        #   higher. Combined with -20 × (z - 0.06)+ penalty above 6 cm,
+        #   pins swing height to 5-6 cm. With big strides this is too flat
+        #   an arc → foot scuffs (v4 duty_factor 0.53).
+        #
+        # 'l2'  (G1-style, new in v8):
+        #   reward = -100 × sum(swing_mask × (z - target)²)
+        #   L2 penalty around target. Swing-mask gate ensures support foot
+        #   is NOT penalized for being at z=0. tanh-of-velocity gate (the
+        #   G1 trick used in v7) was gameable: policy learned to keep
+        #   feet stationary to disable the gate. Phase-clock swing_mask
+        #   is hard-gated by the clock — policy can't escape via velocity.
+        foot_heit_form = getattr(self.cfg.reward, 'foot_heit_form', 'clip') or 'clip'
+        if foot_heit_form == 'l2':
+            _fh_target = float(getattr(self.cfg.reward, 'foot_heit_target', 0.06) or 0.06)
+            _fh_scale  = float(getattr(self.cfg.reward, 'foot_heit_l2_scale', 100.0) or 100.0)
+            foot_heit_score = -_fh_scale * (self.foot_height - _fh_target) ** 2
+            foot_height_rew = torch.sum(
+                self.foot_swing_mask * foot_heit_score, dim=1, keepdim=True
+            ) * self.static_flag
+        else:
+            foot_heit_score = 40. * torch.clip(self.foot_height, min=0.0, max=0.05)
+            foot_height_rew = torch.sum(
+                self.foot_swing_mask * foot_heit_score, dim=1, keepdim=True
+            ).clip(max=2.) * self.static_flag
 
-        foot_height_rew += -20. * torch.sum((self.foot_height - 0.06).clip(min=0.), dim=1, keepdim=True)
-        foot_height_rew += -0.2 * torch.sum(self.foot_support_mask * foot_heit_score, dim=1,keepdim=True) * self.static_flag
-        foot_height_rew += -0.2 * torch.sum(support_foot_index * foot_heit_score, dim=1, keepdim=True) * self.static_flag
+            foot_height_rew += -20. * torch.sum((self.foot_height - 0.06).clip(min=0.), dim=1, keepdim=True)
+            foot_height_rew += -0.2 * torch.sum(self.foot_support_mask * foot_heit_score, dim=1, keepdim=True) * self.static_flag
+            foot_height_rew += -0.2 * torch.sum(support_foot_index * foot_heit_score, dim=1, keepdim=True) * self.static_flag
 
         twist_rew = -torch.norm(self.env.base_euler[:, :2], dim=-1, keepdim=True)
 
@@ -1191,6 +1356,67 @@ class BIRLTask(NullTask):
         else:
             air_time_rew = torch.zeros(self.num_envs, 1, device=self.device)
 
+        # G1-style velocity-gated foot clearance reward (unitree_rl_lab):
+        #   penalty = Σ (foot_z - target)² × tanh(mult × ||foot_v_xy||)
+        # The tanh-of-velocity factor automatically selects swing feet
+        # (high horizontal velocity → tanh ≈ 1, penalty applies) while
+        # leaving support feet unconstrained (v ≈ 0 → tanh ≈ 0). No
+        # clip-saturation: deviation in either direction grows quadratically.
+        # Replaces the clip-saturated `foot_heit` reward which capped at
+        # 5 cm and prevented large strides from clearing the ground cleanly.
+        # `foot_vel` is stored as [num_envs, 6] = [Lx, Ly, Lz, Rx, Ry, Rz].
+        _fc_target = float(getattr(self.cfg.reward, 'foot_clearance_target', 0.06) or 0.06)
+        _fc_mult   = float(getattr(self.cfg.reward, 'foot_clearance_tanh_mult', 2.0) or 2.0)
+        _foot_err_sq = (self.foot_height - _fc_target) ** 2          # [num_envs, 2]
+        foot_clearance_l2 = -torch.sum(
+            _foot_err_sq * torch.tanh(_fc_mult * _foot_xy_vel),
+            dim=-1, keepdim=True
+        )                                                            # ≤ 0
+
+        # BDX-R-MjLab L1 `feet_clearance` reward (legs override w=-4.0):
+        #     cost = Σ |foot_z - target| × ||v_xy(foot)|| × cmd_active
+        # The L1 form (vs L2 above) penalises any deviation from target,
+        # weighted by foot horizontal velocity. The (commanded-magnitude
+        # gate) means it's inactive at standstill so the policy isn't
+        # punished for keeping feet still when stand is the goal.
+        _fc_l1_target = float(getattr(self.cfg.reward, 'feet_clearance_target', 0.06) or 0.06)
+        _fc_cmd_threshold = float(getattr(self.cfg.reward, 'feet_clearance_cmd_threshold', 0.05) or 0.05)
+        _cmd_active_clr = (_cmd_total > _fc_cmd_threshold).float()
+        _foot_z_err = torch.abs(self.foot_height - _fc_l1_target)    # [n, 2]
+        feet_clearance_l1 = -torch.sum(
+            _foot_z_err * _foot_xy_vel, dim=-1, keepdim=True
+        ) * _cmd_active_clr                                          # ≤ 0
+
+        # BDX-R-MjLab peak-tracking foot swing height + soft landing.
+        # During each swing, _foot_peak_z accumulates the per-foot max
+        # z; at first_contact (=`_td_event`) we charge
+        # (peak / target − 1)² × event and immediately reset the peak.
+        # This is far harder to game than continuous clearance rewards
+        # because the policy must demonstrably reach `target` BEFORE
+        # touching down — no credit for staying near the ground.
+        _swing_peak_target = float(getattr(self.cfg.reward, 'feet_swing_target', 0.08) or 0.08)
+        _in_air = (self.env.foot_frc < 1.0).float()                       # [n, num_legs]
+        self._foot_peak_z = torch.maximum(
+            self._foot_peak_z, self.foot_height * _in_air
+        )                                                                 # update peak each step
+        _swing_err = (self._foot_peak_z / _swing_peak_target - 1.0).clamp(min=-1.0, max=2.0)
+        feet_swing_height_peak = -torch.sum(
+            (_swing_err ** 2) * self._td_event.float(), dim=-1, keepdim=True
+        )                                                                 # sparse, ≤ 0
+        # Reset peak after using it
+        self._foot_peak_z = torch.where(
+            self._td_event,
+            torch.zeros_like(self._foot_peak_z),
+            self._foot_peak_z,
+        )
+
+        # BDX-R-MjLab soft_landing: at first_contact, penalise contact-force
+        # magnitude. Drives the policy toward soft, controlled touchdowns
+        # rather than slamming the foot.
+        soft_landing = -torch.sum(
+            self.env.foot_frc * self._td_event.float(), dim=-1, keepdim=True
+        )                                                                 # ≤ 0
+
         # Foot stand reward: ‖cmd‖<0.15 → reward both feet on ground.
         # Counters the "no positive incentive to keep feet planted" gap at
         # standstill (where all foot_* and air_time rewards are static_flag-gated).
@@ -1256,6 +1482,17 @@ class BIRLTask(NullTask):
             foot_stand=foot_stand_rew * w.get('foot_stand', 0.0),
             base_height_l2=base_height_l2 * w.get('base_height_l2', 0.0),
             flat_orient_l2=flat_orient_l2 * w.get('flat_orient_l2', 0.0),
+            foot_clearance_l2=foot_clearance_l2 * w.get('foot_clearance_l2', 0.0),
+            upright=upright_rew * w.get('upright', 0.0),
+            pose_speed=pose_speed_rew * w.get('pose_speed', 0.0),
+            feet_swing_height_peak=feet_swing_height_peak * w.get('feet_swing_height_peak', 0.0),
+            soft_landing=soft_landing * w.get('soft_landing', 0.0),
+            action_rate_l2=action_rate_l2 * w.get('action_rate_l2', 0.0),
+            body_ang_vel=body_ang_vel * w.get('body_ang_vel', 0.0),
+            dof_pos_limits=dof_pos_limits * w.get('dof_pos_limits', 0.0),
+            angular_momentum=angular_momentum * w.get('angular_momentum', 0.0),
+            feet_clearance_l1=feet_clearance_l1 * w.get('feet_clearance_l1', 0.0),
+            feet_slip_l2=feet_slip_l2 * w.get('feet_slip_l2', 0.0),
         )
 
         # Imitation rewards (only active when reference clips are loaded).

@@ -13,6 +13,7 @@ class Actor(nn.Module):
             output_dim: int,
             hidden_layers: Tuple[int, ...] = (128,),
             activation: str = 'tanh',
+            init_noise_std: float = 0.8,
             deploy: bool = False
     ) -> None:
         super().__init__()
@@ -20,7 +21,7 @@ class Actor(nn.Module):
         self.mu = nn.Linear(hidden_layers[-1], output_dim)
         self.deploy = deploy
         self.output_dim = output_dim
-        self.std = nn.Parameter(torch.ones(output_dim) * 0.8)
+        self.std = nn.Parameter(torch.ones(output_dim) * float(init_noise_std))
         # self.mu.weight.data.normal_(0, 0.01)
         Normal.set_default_validate_args = False  # disable args validation for speedup
 

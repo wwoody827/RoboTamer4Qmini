@@ -473,12 +473,12 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, cmd_freq=None, duration=Non
     action_mode = cfg.get('action_mode', 'increment')
     lp_alpha    = cfg.get('action_lowpass_alpha', 1.0)
     obs_per_step = int(cfg.get('num_obs_per_step', 0))
-    # obs_per_step=38 = no-phase-in-obs layout. Used by walk_noclock (mode=none)
-    # AND walk_noclock_v3 (mode=input + Cassie-style — clock ticks for reward
-    # at training time but is intentionally absent from obs).
+    # obs_per_step=38 = walk_noclock layout. obs_per_step=39 = walk_bdxr
+    # (projected_gravity replaces base_euler). obs_per_step=64 = MIRL.
+    is_bdxr     = (obs_per_step == 39)
     is_noclock  = (obs_per_step == 38)
-    is_mirl     = (phase_mode == 'none' and not is_noclock)
-    is_bdx      = (phase_mode == 'input' and not is_noclock)
+    is_mirl     = (phase_mode == 'none' and not is_noclock and not is_bdxr)
+    is_bdx      = (phase_mode == 'input' and not is_noclock and not is_bdxr)
     print(f"[sim2sim] phase.mode={phase_mode}, action_mode={action_mode}, lowpass_alpha={lp_alpha}")
     if is_noclock:
         print("[sim2sim] no-clock mode (10-dim action, 38-dim obs, no phase, no ref slots)")
@@ -667,6 +667,20 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, cmd_freq=None, duration=Non
         ]).astype(np.float32)
         return np.clip(obs, -3.0, 3.0)
 
+    def get_obs_bdxr():
+        """walk_bdxr obs: 39-dim. Slot order:
+        commands_3, base_ang_vel, projected_gravity, joint_pos_err,
+        joint_vel, joint_tracking_err."""
+        q, dq, _, base_ang_vel = _delayed()
+        quat, _ = _get_imu_state()
+        gravity_world = np.array([0.0, 0.0, -1.0], dtype=np.float32)
+        proj_grav = quat_rotate_inverse(quat, gravity_world).astype(np.float32)
+        obs = np.concatenate([
+            commands, base_ang_vel * 0.5, proj_grav,
+            q - ref_joint, dq * 0.1, current_joint_act - q,
+        ]).astype(np.float32)
+        return np.clip(obs, -3.0, 3.0)
+
     def get_obs_bdx():
         """BD_X obs (43-dim) with delayed proprio + ext clock."""
         q, dq, base_euler, base_ang_vel = _delayed()
@@ -750,6 +764,8 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, cmd_freq=None, duration=Non
                 if is_bdx:
                     ext_clock.update(cmd_freq)
                     obs_now = get_obs_bdx()
+                elif is_bdxr:
+                    obs_now = get_obs_bdxr()
                 elif is_noclock:
                     obs_now = get_obs_noclock()
                 elif is_mirl:

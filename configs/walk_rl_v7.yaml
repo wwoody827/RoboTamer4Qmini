@@ -1,0 +1,46 @@
+# walk_rl_v7 — v4 + G1-style velocity-gated foot clearance reward.
+#
+# Issue: v4 walks at correct speed (stride 14cm @ 2.5 Hz = 0.35 m/s) but
+# duty_factor 0.530 (vs ideal 0.50) indicates "extra contact time" — the
+# swing foot scuffs the ground during the swing arc. With our existing
+# `foot_heit` reward capped at 5 cm clearance, a 14 cm horizontal stride
+# produces a very shallow arc that easily intersects the floor under
+# normal body sway.
+#
+# Unitree G1's `foot_clearance_reward` (unitree_rl_lab/rewards.py):
+#   penalty = Σ (foot_z - target)² × tanh(mult × ||foot_v_xy||)
+# Implemented in birl_task.py as `foot_clearance_l2`. Key differences vs
+# our `foot_heit`:
+#   • L2 squared error (unbounded) instead of clip-saturated at 5 cm
+#   • velocity-gated (tanh of foot horizontal speed) auto-selects swing
+#     foot — no need for phase-clock-derived foot_swing_mask
+#   • penalizes both too-low AND too-high deviation from target
+#
+# Target: 6 cm (between our old 5 cm cap and G1's 10 cm — first probe).
+# tanh_mult: 2.0 (matches G1).
+# Weight: 50 (calibrated so a 4 cm deviation in swing gives ~−0.08/step
+# penalty, comparable in magnitude to a single regulator term).
+#
+# Other changes from v4:
+#   • `foot_heit: 0.7 → 0.0`     — turn off the clip-saturated old version
+#   • `foot_clearance_l2: 50.0`  — new G1-style penalty
+#
+# Carry-overs from v4:
+#   • foot_stand: 1.0
+#   • base_heit:  3.0
+#   • wider delay DR [1, 50] / [1, 60] / [1, 60]
+
+_base: walk_rl.yaml
+
+reward:
+  foot_stand:        1.0
+  base_heit:         3.0
+  foot_heit:         0.0    # OFF — replaced by foot_clearance_l2
+  foot_clearance_l2: 50.0   # NEW — G1 style velocity-gated L2 penalty
+  foot_clearance_target:   0.06   # 6 cm target swing height
+  foot_clearance_tanh_mult: 2.0   # tanh(2 × ||foot_v_xy||) — speed gate
+
+domain_rand:
+  delay_joint_ranges: [1, 50]
+  delay_angle_ranges: [1, 60]
+  delay_rate_ranges:  [1, 60]

@@ -157,6 +157,17 @@ def _base_euler(task):
     return task.base_euler[:, :2]
 
 
+@obs_slot('projected_gravity', dim=3, mirror=mirror_signs([1, -1, 1]))
+def _projected_gravity(task):
+    """Projected gravity in body frame (3-dim, IMU-style — what real robots
+    output directly).  Equivalent to roll/pitch but more robust at large
+    tilts. Used by BDX-R-MjLab / Isaac Lab humanoid configs.
+
+    Mirror: gravity_x stays (forward axis), gravity_y flips, gravity_z stays.
+    """
+    return task.env.projected_gravity
+
+
 @obs_slot('base_ang_vel', dim=3, mirror=mirror_signs([-1, 1, -1]))
 def _base_ang_vel(task):
     """Angular velocity × 0.5 from delayed IMU."""

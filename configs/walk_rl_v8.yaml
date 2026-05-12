@@ -1,0 +1,53 @@
+# walk_rl_v8 — phase-clock-gated L2 foot height reward.
+#
+# v7 used G1's velocity-gated foot_clearance_l2. Policy gamed it by
+# stopping foot horizontal motion (tanh(v) → 0 disables penalty).
+# Result: 0.04 m strides, duty_factor 0.69 (severe shuffling).
+#
+# v8 keeps the G1-style L2 *shape* but uses the existing phase-clock
+# `foot_swing_mask` as the hard gate instead of velocity. Phase mask is
+# clock-driven → policy CANNOT escape it by keeping feet still (clock
+# advances regardless). Combined with the existing foot_phase=8.0 reward
+# (which pushes policy to actually swing the foot when clock says swing),
+# this leaves the policy no shuffle escape.
+#
+# Concretely, the foot_heit reward goes from:
+#   reward = sum(swing_mask × 40 × clip(z, 0, 0.05)).clip(max=2)
+#            − 20 × (z − 0.06)⁺ − 0.2 × support_mask×score − ...
+# to:
+#   reward = −scale × sum(swing_mask × (z − target)²) × static_flag
+#
+# With target=0.06 m (between our old 5 cm cap and G1's 10 cm), scale=100
+# (so 2 cm deviation → −0.04/foot/step; 4 cm → −0.16/foot/step), the
+# swing-mask gate naturally ignores the support foot.
+#
+# Other v8 differences vs walk_v34:
+#   foot_heit_form: l2 (NEW config knob; default 'clip' preserves legacy)
+#   foot_heit_target: 0.06 m
+#   foot_heit_l2_scale: 100
+#   foot_heit weight: 0.7 → 1.0 (slightly higher to make the penalty matter)
+#   foot_stand: 1.0 (carry-over from v2)
+#   base_heit: 3.0 (carry-over from v3/v4 — no harm, slight help)
+#   delay DR [1, 50]/[1, 60]/[1, 60] (carry-over from v4)
+#   foot_clearance_l2: 0 (off — replaced by foot_heit_form: l2)
+
+_base: walk_rl.yaml
+
+reward:
+  # Foot clearance — phase-clock-gated L2 penalty (the v8 fix)
+  foot_heit_form:     l2
+  foot_heit_target:   0.06     # 6 cm target swing height
+  foot_heit_l2_scale: 100.0
+  foot_heit:          1.0      # weight on the new L2 term
+
+  # v7's velocity-gated version OFF (gameable)
+  foot_clearance_l2:  0.0
+
+  # Carry-overs
+  foot_stand: 1.0
+  base_heit:  3.0
+
+domain_rand:
+  delay_joint_ranges: [1, 50]
+  delay_angle_ranges: [1, 60]
+  delay_rate_ranges:  [1, 60]

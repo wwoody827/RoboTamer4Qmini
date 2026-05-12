@@ -1,0 +1,124 @@
+format_version: 3
+task_type: BIRL
+obs_per_step: 39
+obs_history: 5
+obs_skip: 2
+obs_slots:
+- commands_3
+- base_ang_vel
+- projected_gravity
+- joint_pos_err
+- joint_vel
+- joint_tracking_err
+obs_total: 195
+action_dim: 10
+action_mode: absolute
+action_lowpass_alpha: 0.75
+action_scaling:
+  inc_low:
+  - -10.0
+  - -10.0
+  - -10.0
+  - -10.0
+  - -10.0
+  - -10.0
+  - -10.0
+  - -10.0
+  - -10.0
+  - -10.0
+  inc_high:
+  - 10.0
+  - 10.0
+  - 10.0
+  - 10.0
+  - 10.0
+  - 10.0
+  - 10.0
+  - 10.0
+  - 10.0
+  - 10.0
+  abs_low: null
+  abs_high: null
+ref_joint_pos:
+- 0.4
+- -0.1
+- -1.5
+- 1.0
+- -1.3
+- -0.4
+- 0.1
+- 1.5
+- -1.0
+- 1.3
+pd_gains:
+  kps:
+  - 55.0
+  - 105.0
+  - 75.0
+  - 45.0
+  - 30.0
+  - 55.0
+  - 105.0
+  - 75.0
+  - 45.0
+  - 30.0
+  kds:
+  - 0.3
+  - 2.5
+  - 0.3
+  - 0.5
+  - 0.25
+  - 0.3
+  - 2.5
+  - 0.3
+  - 0.5
+  - 0.25
+  decimation: 15
+joint_limits:
+  low:
+  - -0.10000000149011612
+  - -0.30000001192092896
+  - -2.0999999046325684
+  - -0.0
+  - -2.5
+  - -0.699999988079071
+  - -0.6000000238418579
+  - 0.0
+  - -2.0999999046325684
+  - 0.0
+  high:
+  - 0.699999988079071
+  - 0.6000000238418579
+  - 0.0
+  - 2.0999999046325684
+  - 0.0
+  - 0.10000000149011612
+  - 0.30000001192092896
+  - 2.0999999046325684
+  - 0.0
+  - 2.5
+phase_modulator:
+  enabled: false
+  mode: input
+  num_legs: 2
+  static_cmd_threshold: 0.15
+  freq_low: 2.0
+  freq_high: 3.0
+  freq_default: 2.5
+use_teacher_obs: false
+hidden_layers:
+- 512
+- 256
+activation: relu
+simulation_dt: 0.001
+urdf_path: assets/q1/urdf/q1.urdf
+init_height: 0.45
+delay_joint_ranges:
+- 1
+- 50
+delay_angle_ranges:
+- 1
+- 60
+delay_rate_ranges:
+- 1
+- 60

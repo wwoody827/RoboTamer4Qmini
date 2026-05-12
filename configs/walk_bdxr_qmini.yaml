@@ -1,0 +1,61 @@
+# walk_bdxr_qmini.yaml — BDX-R-MjLab recipe tuned for Qmini physics.
+#
+# Goal: match or beat walk_rl_v4 deploy candidate on sim2sim:
+#   • Survival ≥ 64 s across 9-cmd × 3-seed × 8-s grid (v4: 72 s)
+#   • pitch_rms walk ≤ 0.06 rad                       (v4: 0.055)
+#   • com_z stand ≥ 0.40 m                            (v4: 0.375)
+#   • vx_bias_walk ≤ 0.10                             (v4: 0.073)
+#
+# Built on walk_bdxr_full (BDX-R obs/action/reward set) + Qmini-specific
+# adjustments:
+#
+# 1. **Match BDX-R model architecture** (key fix):
+#      policy.hidden_layers: 512-256-128  (was 512-256)
+#      policy.activation:    elu          (was relu)
+#    BDX-R uses a deeper, ELU-activated network.
+#
+# 2. **Match BDX-R PPO hyperparameters** (key fix):
+#      algorithm.entropy_coef:      0.01  (was 0.0005 — 20× higher!)
+#      algorithm.num_learning_epochs: 5   (was 3)
+#      algorithm.discount_factor:   0.99  (was 0.995)
+#    The entropy_coef gap was the main learning bottleneck — we were
+#    exploring far too cautiously to find a BDX-R-style gait.
+#
+# 3. **Qmini hardware adjustments**:
+#    • action_rate_l2 weight 0.1 → 0.3
+#      Qmini kd=0.3 (vs BDX-R kd=5.0 → 16× weaker damping). Need stronger
+#      action_rate_l2 penalty to compensate for the missing physical
+#      smoothness damping.
+#    • foot_clearance term enabled (BDX-R legs override uses -4.0)
+#    • pose_speed weight 1.0 → 1.5 — slightly stronger pull to ref pose
+#      since Qmini's ref is a deep squat that the policy tends to drift
+#      from (we want stand at the ref pose's nominal height).
+#
+# Everything else inherits walk_bdxr_full (BDX-R obs slots incl. projected
+# gravity, action_mode absolute + lp 0.75 + URDF limits, DR ranges).
+
+_base: walk_bdxr_full.yaml
+
+policy:
+  hidden_layers: [512, 256, 128]   # MATCH BDX-R 3-layer
+  activation: elu                  # MATCH BDX-R activation
+
+algorithm:
+  entropy_coef:      0.01          # MATCH BDX-R (was 0.0005 — 20× higher)
+  num_learning_epochs: 5           # MATCH BDX-R (was 3)
+  discount_factor:   0.99          # MATCH BDX-R (was 0.995)
+  # Keep the rest:
+  # learning_rate: 1.0e-3, gae_lambda: 0.95, eps_clip: 0.2
+  # use_clipped_value_loss: true, value_loss_coef: 1.0
+  # max_grad_norm: 1.0, desired_kl: 0.01, normalize_value: true
+
+reward:
+  # Adjustments for Qmini physics (vs BDX-R legs config)
+  action_rate_l2: 0.3              # was 0.1 — compensate Qmini's low kd
+  pose_speed:     1.5              # was 1.0 — stronger pull to ref pose
+
+  # foot_clearance: was 0 in walk_bdxr_full. BDX-R legs override uses -4.
+  # Our foot_clearance_l2 has velocity gate (BDX-R style) — turn it on.
+  foot_clearance_l2: 4.0           # BDX-R legs weight magnitude
+  foot_clearance_target:   0.06
+  foot_clearance_tanh_mult: 2.0
