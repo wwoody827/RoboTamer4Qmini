@@ -1,18 +1,18 @@
 """V2Task — minimal stand task for walk_clean v2 series.
 
-13 reward components:
-  Bounded positive bells (each in (0, 1]):
-    height, upright, lin_vel, ang_vel, foot_slip, foot_rot, drift
-  L2 penalties (gradient everywhere, unlike bells that saturate at 0):
-    yaw_lock, body_lock
-  Small regularizers:
-    joint_vel, torque, smooth
-  Termination:
-    term  (-1 only on fall, not on timeout)
+14 reward components — see REWARD_NAMES below.
+
+Bell rewards use robust_bell(): exp(-err²/σ²) − l2·clip(err²/(4σ)², 0, 1).
+Always has long-range gradient unlike pure exp bells (which saturate at 0).
 
 Foot terms are contact-gated: multiplied by contact_avg ∈ {0, 0.5, 1.0} so
 airborne foot → 0 reward (prevents the "hopping" exploit where lifting feet
 maximizes exp(-0·in_contact) = 1).
+
+foot_geom constrains stance: foot xy positions relative to base in heading
+frame. Lets policy freely tune sagittal-plane joints (hip_pitch/knee/ankle
+for body lean/height) while keeping foot placement (hip_yaw + hip_roll) at
+ref. Subtracting base_pos_hd makes it invariant to where each env spawns.
 
 Action: residual mode only. target = ref_joint + lp_filtered(scaled_offset).
 Phase: none. No clock signal in obs.
@@ -30,6 +30,41 @@ from env.utils.math import scale_transform
 from isaacgym.torch_utils import to_torch, torch_rand_float
 
 
+def robust_bell(err_sq: torch.Tensor, sigma_bell: float,
+                sigma_l2_ratio: float = 4.0, l2_weight: float = 0.1) -> torch.Tensor:
+    """Robust-bell reward (RL analog of Huber loss).
+
+    Pure exp() bell loses gradient when |err| >> σ_bell: exp(-9)≈1e-4 with
+    near-zero slope. PPO can't escape regions far from the target. The "lock"
+    L2 trick (yaw_lock, body_lock) fixes this by adding a parallel L2 penalty
+    on the same quantity. This helper bakes both into one expression so any
+    bell-shaped reward gets long-range gradient for free.
+
+    r(err) = exp(-err²/σ_bell²) − l2_weight · clip(err²/(σ_l2_ratio·σ_bell)², 0, 1)
+
+      err = 0:                  bell = 1, l2 = 0 → r = +1.0   (max)
+      err = σ_bell:             bell ≈ 0.37     → r ≈ +0.35
+      err = σ_l2_ratio·σ_bell:  bell ≈ 0, l2 = 1 → r = −l2_weight (floor)
+      err → ∞:                  reward saturates at −l2_weight; gradient is
+                                the clipped L2 (constant inside the band).
+
+    Args:
+        err_sq: squared error per env, shape [N, 1] or [N].
+        sigma_bell: tight bell scale (where the bell decays).
+        sigma_l2_ratio: σ_l2 = ratio · σ_bell (wider than bell for coarse pull).
+        l2_weight: depth of the L2 floor (default 0.1 — small enough that 8
+            bells stacked don't dominate the per-step return; bump higher if
+            a specific bell has plateau issues).
+
+    Returns:
+        Reward in [−l2_weight, 1.0]. Always differentiable wrt err.
+    """
+    bell = torch.exp(-err_sq / (sigma_bell ** 2))
+    sigma_l2_sq = (sigma_bell * sigma_l2_ratio) ** 2
+    l2 = torch.clip(err_sq / sigma_l2_sq, 0.0, 1.0)
+    return bell - l2_weight * l2
+
+
 # Reward names in fixed order (for TB logging)
 REWARD_NAMES = (
     'height',        # exp(-((z - target_z)/σ)^2)              bounded (0,1]
@@ -38,6 +73,7 @@ REWARD_NAMES = (
     'ang_vel',       # exp(-ang_err^2/σ^2)                     bounded (0,1]
     'yaw_lock',      # -clip(yaw_rate²/σ², 0, 1)               L2: gradient everywhere
     'body_lock',     # -clip(rp_avel²/σ², 0, 1)                 L2: stops pitch/roll hover
+    'foot_geom',     # robust_bell on foot xy rel to base in heading frame (4 dim)
     'foot_slip',     # exp(-Σ ||v_xy(foot)||²)·contact_avg      contact-gated (×0 if airborne)
     'foot_rot',      # exp(-Σ ||ω(foot)||²)·contact_avg         contact-gated (×0 if airborne)
     'drift',         # exp(-||xy - episode_init_xy||²/σ^2)     position lock
@@ -131,6 +167,7 @@ class V2Task(NullTask):
             float(getattr(r, 'w_ang_vel',    1.0)),
             float(getattr(r, 'w_yaw_lock',   2.0)),
             float(getattr(r, 'w_body_lock',  3.0)),
+            float(getattr(r, 'w_foot_geom',  2.0)),
             float(getattr(r, 'w_foot_slip',  1.5)),
             float(getattr(r, 'w_foot_rot',   1.5)),
             float(getattr(r, 'w_drift',      2.0)),
@@ -146,6 +183,8 @@ class V2Task(NullTask):
         self._ang_vel_scale    = float(getattr(r, 'ang_vel_scale',    0.50))
         self._yaw_lock_scale   = float(getattr(r, 'yaw_lock_scale',   1.0))  # rad/s — saturates at yaw=1
         self._body_lock_scale  = float(getattr(r, 'body_lock_scale',  1.0))  # rad/s combined rp_avel
+        self._foot_geom_scale  = float(getattr(r, 'foot_geom_scale',  0.05)) # m (xy) / rad (yaw) per-dim
+        self._foot_ref_state   = None  # captured on first reward() call from a clean reset env
         self._foot_slip_scale  = float(getattr(r, 'foot_slip_scale',  0.05))
         self._foot_rot_scale   = float(getattr(r, 'foot_rot_scale',   0.30))
         self._drift_scale      = float(getattr(r, 'drift_scale',      0.20))
@@ -276,24 +315,26 @@ class V2Task(NullTask):
         idx = [i * self._obs_skip for i in range(self._obs_history_n)]
         return torch.cat([buf[i] for i in idx], dim=-1)
 
-    # ── reward (13 terms; see REWARD_NAMES at top for layout) ────────────
+    # ── reward (14 terms; see REWARD_NAMES at top for layout) ────────────
+    # Bells use robust_bell() helper: exp(-err²/σ²) − 0.5·clip(err²/(4σ)², 0, 1).
+    # Always has long-range gradient (Huber-like), no plateau beyond ±3σ.
     def reward(self) -> Tuple[torch.Tensor, torch.Tensor]:
-        # Bounded positive tracking terms — each in (0, 1].
+        # Bounded positive tracking terms.
         bz = self.env.base_pos[:, [2]]
-        height_err_sq = ((bz - self._target_z) / self._height_scale) ** 2
-        r_height = torch.exp(-height_err_sq)
+        height_err_sq = (bz - self._target_z) ** 2
+        r_height = robust_bell(height_err_sq, self._height_scale)
 
         g_xy_sq = torch.sum(self.env.projected_gravity[:, :2] ** 2, dim=-1, keepdim=True)
-        r_upright = torch.exp(-g_xy_sq / (self._upright_scale ** 2))
+        r_upright = robust_bell(g_xy_sq, self._upright_scale)
 
         vel_err_sq = torch.sum((self.base_lin_vel[:, :2] - self.commands[:, :2]) ** 2,
                                dim=-1, keepdim=True)
-        r_lin_vel = torch.exp(-vel_err_sq / (self._lin_vel_scale ** 2))
+        r_lin_vel = robust_bell(vel_err_sq, self._lin_vel_scale)
 
         yaw_err_sq = (self.base_ang_vel[:, [2]] - self.commands[:, [2]]) ** 2
         rp_avel_sq = torch.sum(self.base_ang_vel[:, :2] ** 2, dim=-1, keepdim=True)
         ang_err_sq = yaw_err_sq + rp_avel_sq * 0.3
-        r_ang_vel = torch.exp(-ang_err_sq / (self._ang_vel_scale ** 2))
+        r_ang_vel = robust_bell(ang_err_sq, self._ang_vel_scale)
 
         # L2 yaw-rate penalty: gradient exists at ANY yaw_rate (unlike bell which
         # saturates at 0 reward beyond ~3σ). Clipped to [-1, 0] for stability.
@@ -304,6 +345,25 @@ class V2Task(NullTask):
         # ang_vel bell saturates at 0 for high rp_avel → no gradient → policy
         # hovers via pitch/roll oscillation.
         r_body_lock = -torch.clip(rp_avel_sq / (self._body_lock_scale ** 2), 0.0, 1.0)
+
+        # Foot geometry bell: constrain stance (foot xy relative to base in
+        # heading frame). Lets policy freely optimize hip_pitch/knee/ankle
+        # while keeping foot placement (hip_yaw + hip_roll) close to ref.
+        # Both foot_pos_hd and base_pos_hd are world-position rotated by
+        # heading-inverse, so the difference is foot-relative-to-base in a
+        # body-yaw-aligned frame — invariant to where each env spawns.
+        base_xy_hd = self.env.base_pos_hd[:, 0:2]
+        foot_state = torch.cat([
+            self.env.foot_pos_hd[:, 0:2] - base_xy_hd,   # L foot xy rel to base
+            self.env.foot_pos_hd[:, 3:5] - base_xy_hd,   # R foot xy rel to base
+        ], dim=-1)
+        if self._foot_ref_state is None:
+            # First call: capture ref. Average across envs to wash out the
+            # ±0.1 rad joint reset noise.
+            self._foot_ref_state = foot_state.mean(dim=0, keepdim=True).detach()
+        foot_geom_err_sq = torch.sum((foot_state - self._foot_ref_state) ** 2,
+                                      dim=-1, keepdim=True) / foot_state.shape[-1]
+        r_foot_geom = robust_bell(foot_geom_err_sq, self._foot_geom_scale)
 
         # Foot terms: contact-gated. swing-leg motion is free (walk-compatible).
         # foot_vel is heading-frame [N, 6] = (vx,vy,vz)_L | (vx,vy,vz)_R.
@@ -316,19 +376,19 @@ class V2Task(NullTask):
         vxy_R = self.env.foot_vel[:, 3:5]
         slip_sq = (torch.sum(vxy_L ** 2, dim=-1) * in_contact[:, 0] +
                    torch.sum(vxy_R ** 2, dim=-1) * in_contact[:, 1]).unsqueeze(-1)
-        r_foot_slip = torch.exp(-slip_sq / (self._foot_slip_scale ** 2)) * contact_avg
+        r_foot_slip = robust_bell(slip_sq, self._foot_slip_scale) * contact_avg
 
         # World-frame angular velocity of each foot from rigid_body_param.
         avel_L = self.env.rigid_body_param[:, self._foot_idx_L, 10:13]
         avel_R = self.env.rigid_body_param[:, self._foot_idx_R, 10:13]
         rot_sq = (torch.sum(avel_L ** 2, dim=-1) * in_contact[:, 0] +
                   torch.sum(avel_R ** 2, dim=-1) * in_contact[:, 1]).unsqueeze(-1)
-        r_foot_rot = torch.exp(-rot_sq / (self._foot_rot_scale ** 2)) * contact_avg
+        r_foot_rot = robust_bell(rot_sq, self._foot_rot_scale) * contact_avg
 
         # Drift from episode start (XY only).
         drift_sq = torch.sum((self.env.base_pos[:, :2] - self._episode_init_xy) ** 2,
                              dim=-1, keepdim=True)
-        r_drift = torch.exp(-drift_sq / (self._drift_scale ** 2))
+        r_drift = robust_bell(drift_sq, self._drift_scale)
 
         # Small negative regularization — must not dominate positives.
         r_jvel   = -torch.sum(self.env.joint_vel ** 2, dim=-1, keepdim=True) / 1000.0
@@ -344,9 +404,10 @@ class V2Task(NullTask):
 
         components = torch.cat([
             r_height, r_upright, r_lin_vel, r_ang_vel, r_yaw_lock, r_body_lock,
+            r_foot_geom,
             r_foot_slip, r_foot_rot, r_drift,
             r_jvel, r_torque, r_smooth, r_term,
-        ], dim=1)  # [n, 13]
+        ], dim=1)  # [n, 14]
         weighted = components * self._w.unsqueeze(0)
         self._last_rew_components = weighted
         return weighted, weighted

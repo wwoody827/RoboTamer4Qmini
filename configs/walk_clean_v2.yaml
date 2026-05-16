@@ -54,6 +54,7 @@ reward:
   ang_vel_scale:     0.20           # bell for fine yaw tracking
   yaw_lock_scale:    1.0            # rad/s — L2 penalty saturates at yaw=1, gradient everywhere
   body_lock_scale:   1.0            # rad/s — L2 for combined roll/pitch rate
+  foot_geom_scale:   0.10           # m — per-dim mean foot xy deviation from ref (heading frame)
   foot_slip_scale:   0.05           # m/s — planted foot must be stationary
   foot_rot_scale:    0.30           # rad/s — planted foot must not pivot
   drift_scale:       0.20           # m — episode-start anchor (decays beyond 20cm)
@@ -64,6 +65,7 @@ reward:
   w_ang_vel:         1.0
   w_yaw_lock:        2.0            # L2 form: -1 at yaw=1, -0.25 at yaw=0.5
   w_body_lock:       3.0            # L2 on rp_avel: stops pitch/roll hovering
+  w_foot_geom:       2.0            # keep stance + foot yaw close to ref
   w_foot_slip:       1.5
   w_foot_rot:        1.5
   w_drift:           2.0
