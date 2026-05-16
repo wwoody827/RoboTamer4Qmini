@@ -35,11 +35,6 @@ except ImportError:
 # Manifest loader — build sim2sim cfg from self-describing export manifest
 # ---------------------------------------------------------------------------
 
-# Torque correction terms (hardcoded in legged_robot.py — robot-specific constants)
-_JOINT_TOR_OFFSET = [0.6, 1.0, 0.0, 0.7, 0.0, -0.6, -1.0, 0.0, -0.7, 0.0]
-_JOINT_VEL_SIGN   = [0.0, 1.0, 0.0, 0.0, 0.0,  0.0,  1.0, 0.0,  0.0, 0.0]
-
-
 def load_manifest(policy_path):
     """Auto-discover and load the manifest YAML next to an ONNX policy file.
 
@@ -73,6 +68,9 @@ def manifest_to_sim2sim_cfg(manifest, policy_path):
     if action_mode == 'absolute':
         act_low = scaling['abs_low']
         act_high = scaling['abs_high']
+    elif action_mode == 'residual':
+        act_low = scaling.get('residual_low')
+        act_high = scaling.get('residual_high')
     else:
         act_low = scaling['inc_low']
         act_high = scaling['inc_high']
@@ -97,8 +95,6 @@ def manifest_to_sim2sim_cfg(manifest, policy_path):
         'ref_joint_pos':      manifest['ref_joint_pos'],
         'kps':                manifest['pd_gains']['kps'],
         'kds':                manifest['pd_gains']['kds'],
-        'joint_tor_offset':   _JOINT_TOR_OFFSET,
-        'joint_vel_sign':     _JOINT_VEL_SIGN,
         'action_inc_low':     act_low,
         'action_inc_high':    act_high,
         'joint_limit_low':    manifest['joint_limits']['low'],
@@ -455,8 +451,6 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, cmd_freq=None, duration=Non
     ref_joint   = np.array(cfg['ref_joint_pos'],    dtype=np.float32)
     kps         = np.array(cfg['kps'],               dtype=np.float32)
     kds         = np.array(cfg['kds'],               dtype=np.float32)
-    tor_offset  = np.array(cfg['joint_tor_offset'],  dtype=np.float32)
-    vel_sign    = np.array(cfg['joint_vel_sign'],    dtype=np.float32)
     # act_low/act_high resolved after model load (absolute mode may need URDF limits)
     _act_low_cfg  = cfg['action_inc_low']
     _act_high_cfg = cfg['action_inc_high']
@@ -475,15 +469,21 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, cmd_freq=None, duration=Non
     obs_per_step = int(cfg.get('num_obs_per_step', 0))
     # obs_per_step=38 = walk_noclock layout. obs_per_step=39 = walk_bdxr
     # (projected_gravity replaces base_euler). obs_per_step=64 = MIRL.
+    # obs_per_step=44 + phase.mode=input = walk_clean_v11+ (projected_gravity
+    # + phase_clock + phase_freq_cmd).
     is_bdxr     = (obs_per_step == 39)
     is_noclock  = (obs_per_step == 38)
+    is_walk_clean_clk = (obs_per_step == 44 and phase_mode == 'input')
     is_mirl     = (phase_mode == 'none' and not is_noclock and not is_bdxr)
-    is_bdx      = (phase_mode == 'input' and not is_noclock and not is_bdxr)
+    is_bdx      = (phase_mode == 'input' and not is_noclock and not is_bdxr
+                   and not is_walk_clean_clk)
     print(f"[sim2sim] phase.mode={phase_mode}, action_mode={action_mode}, lowpass_alpha={lp_alpha}")
     if is_noclock:
         print("[sim2sim] no-clock mode (10-dim action, 38-dim obs, no phase, no ref slots)")
     elif is_mirl:
         print("[sim2sim] MIRL mode (10-dim action, 64-dim obs, no phase modulator)")
+    elif is_walk_clean_clk:
+        print("[sim2sim] walk_clean_clk mode (10-dim action, 44-dim obs, projected_gravity + phase_clock)")
     elif is_bdx:
         print("[sim2sim] BD_X mode (10-dim action, external phase clock, absolute targets)")
 
@@ -563,7 +563,7 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, cmd_freq=None, duration=Non
     ext_clock = None
     freq_mid = None
     freq_scale = None
-    if is_bdx:
+    if is_bdx or is_walk_clean_clk:
         freq_default = cfg.get('phase_freq_default', cmd_freq)
         freq_lo = cfg.get('phase_freq_low', freq_default - 0.5)
         freq_hi = cfg.get('phase_freq_high', freq_default + 0.5)
@@ -574,7 +574,8 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, cmd_freq=None, duration=Non
         )
         ext_clock.reset()
         print(f"[sim2sim] cmd_freq={cmd_freq:.3f} Hz  (train range [{freq_lo:.2f}, {freq_hi:.2f}])")
-    lp_target = ref_joint.copy()  # lowpass state for absolute mode
+    # lowpass state: ref pose for absolute mode; zero offset for residual mode
+    lp_target = np.zeros_like(ref_joint) if action_mode == 'residual' else ref_joint.copy()
 
     current_joint_act = ref_joint.copy()
     _buf_len = (obs_hist - 1) * obs_skip + 1
@@ -681,6 +682,32 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, cmd_freq=None, duration=Non
         ]).astype(np.float32)
         return np.clip(obs, -3.0, 3.0)
 
+    def get_obs_walk_clean_clk():
+        """walk_clean_v11+ obs: 44-dim. projected_gravity (3) instead of
+        base_euler (2). Order: commands_3, base_ang_vel, projected_gravity,
+        joint_pos_err, joint_vel, joint_tracking_err, phase_clock, phase_freq_cmd.
+        """
+        q, dq, _, base_ang_vel = _delayed()
+        quat, _ = _get_imu_state()
+        gravity_world = np.array([0.0, 0.0, -1.0], dtype=np.float32)
+        proj_grav = quat_rotate_inverse(quat, gravity_world).astype(np.float32)
+        phase_clock = ext_clock.sin_cos() * static_flag
+        freq_cmd_norm = np.array(
+            [((cmd_freq - freq_mid) / freq_scale) * static_flag],
+            dtype=np.float32,
+        )
+        obs = np.concatenate([
+            commands,               # 3
+            base_ang_vel * 0.5,     # 3
+            proj_grav,              # 3
+            q - ref_joint,          # 10
+            dq * 0.1,               # 10
+            current_joint_act - q,  # 10
+            phase_clock,            # 4
+            freq_cmd_norm,          # 1
+        ]).astype(np.float32)
+        return np.clip(obs, -3.0, 3.0)
+
     def get_obs_bdx():
         """BD_X obs (43-dim) with delayed proprio + ext clock."""
         q, dq, base_euler, base_ang_vel = _delayed()
@@ -706,17 +733,9 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, cmd_freq=None, duration=Non
         return obs
 
     def compute_torques(target_q, q, dq):
-        """
-        Matches legged_robot.py line 414:
-          kp * kp_rand * error + kd_const - kd_rand * vel + offset - friction
-        With rand=1: kp*error + kd - vel + offset - 3.5*sign(vel)*vel_sign
-        """
+        """Standard PD: τ = kp*(target-q) - kd*dq. Matches legged_robot.py."""
         error = target_q - q
-        torques = (kps * error
-                   + kds
-                   - dq
-                   + tor_offset
-                   - 3.5 * np.sign(dq) * vel_sign)
+        torques = kps * error - kds * dq
         return torques
 
     step = 0
@@ -761,7 +780,10 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, cmd_freq=None, duration=Non
         if step % decimation == 0:
             if not stand_only:
                 # Select obs function based on phase mode
-                if is_bdx:
+                if is_walk_clean_clk:
+                    ext_clock.update(cmd_freq)
+                    obs_now = get_obs_walk_clean_clk()
+                elif is_bdx:
                     ext_clock.update(cmd_freq)
                     obs_now = get_obs_bdx()
                 elif is_bdxr:
@@ -790,6 +812,13 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, cmd_freq=None, duration=Non
 
                 if action_mode == 'increment':
                     current_joint_act[:] += joint_out * policy_dt
+                elif action_mode == 'residual':
+                    # joint_out is offset from ref. Lowpass on the offset, then add ref.
+                    if lp_alpha < 1.0:
+                        lp_target[:] = lp_alpha * joint_out + (1.0 - lp_alpha) * lp_target
+                    else:
+                        lp_target[:] = joint_out
+                    current_joint_act[:] = ref_joint + lp_target
                 else:
                     # Absolute mode with optional lowpass
                     if lp_alpha < 1.0:

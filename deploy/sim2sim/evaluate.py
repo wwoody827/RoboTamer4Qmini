@@ -58,8 +58,6 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
     ref_joint  = np.array(cfg['ref_joint_pos'],   dtype=np.float32)
     kps        = np.array(cfg['kps'],              dtype=np.float32)
     kds        = np.array(cfg['kds'],              dtype=np.float32)
-    tor_offset = np.array(cfg['joint_tor_offset'], dtype=np.float32)
-    vel_sign   = np.array(cfg['joint_vel_sign'],   dtype=np.float32)
     _act_low_cfg  = cfg['action_inc_low']
     _act_high_cfg = cfg['action_inc_high']
     jlim_low_cfg  = cfg['joint_limit_low']
@@ -78,8 +76,11 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
     # but the phase slots are intentionally absent from obs — Cassie-style).
     is_bdxr     = (obs_dim == 39)
     is_noclock  = (obs_dim == 38)
+    # walk_clean_v11+: 44-dim per frame = projected_gravity + phase_clock + phase_freq_cmd
+    # Same as BD-X but with projected_gravity (3) instead of base_euler (2).
+    is_walk_clean_clk = (obs_dim == 44 and phase_mode == 'input')
     is_mirl     = (phase_mode == 'none' and not is_noclock and not is_bdxr)
-    is_bdx      = (phase_mode == 'input' and not is_noclock and not is_bdxr)
+    is_bdx      = (phase_mode == 'input' and not is_noclock and not is_bdxr and not is_walk_clean_clk)
 
     commands    = np.array([cmd_vx, cmd_vy, cmd_yaw], dtype=np.float32)
     static_flag = float(np.linalg.norm(commands) >= static_thr)
@@ -127,7 +128,7 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
     ext_clock = None
     freq_mid = None
     freq_scale = None
-    if is_bdx:
+    if is_bdx or is_walk_clean_clk:
         freq_default = float(cfg.get('phase_freq_default', 2.5))
         freq_lo = float(cfg.get('phase_freq_low', freq_default - 0.5))
         freq_hi = float(cfg.get('phase_freq_high', freq_default + 0.5))
@@ -139,7 +140,8 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
             dt=policy_dt, num_legs=num_legs, default_freq=freq_default,
         )
         ext_clock.reset()
-    lp_target = ref_joint.copy()
+    # residual mode: lp_target stores offset → init to 0 (so target = ref + 0 = ref)
+    lp_target = np.zeros_like(ref_joint) if action_mode == 'residual' else ref_joint.copy()
     current_joint_act = ref_joint.copy()
     # Framestack: training uses obs_history × obs_skip — buffer holds enough
     # raw frames so we can index back by `i * obs_skip` for i in [0, obs_hist).
@@ -291,9 +293,36 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
         ]).astype(np.float32)
         return np.clip(obs, -3.0, 3.0)
 
+    def get_obs_walk_clean_clk():
+        """walk_clean_v11+ obs: 44-dim. projected_gravity (3) instead of
+        base_euler (2). Order: commands_3, base_ang_vel, projected_gravity,
+        joint_pos_err, joint_vel, joint_tracking_err, phase_clock, phase_freq_cmd.
+        """
+        q, dq, _, base_ang_vel = _delayed()
+        quat, _ = _imu_state()
+        gravity_world = np.array([0.0, 0.0, -1.0], dtype=np.float32)
+        proj_grav = quat_rotate_inverse(quat, gravity_world).astype(np.float32)
+        phase_clock = ext_clock.sin_cos() * static_flag
+        freq_cmd_norm = np.array(
+            [((cmd_freq - freq_mid) / freq_scale) * static_flag],
+            dtype=np.float32,
+        )
+        obs = np.concatenate([
+            commands,               # 3
+            base_ang_vel * 0.5,     # 3
+            proj_grav,              # 3
+            q - ref_joint,          # 10
+            dq * 0.1,               # 10
+            current_joint_act - q,  # 10
+            phase_clock,            # 4
+            freq_cmd_norm,          # 1
+        ]).astype(np.float32)
+        return np.clip(obs, -3.0, 3.0)
+
     def compute_torques(target_q, q, dq):
+        """Standard PD: τ = kp*(target-q) - kd*dq. Matches legged_robot.py."""
         error = target_q - q
-        return kps * error + kds - dq + tor_offset - 3.5 * np.sign(dq) * vel_sign
+        return kps * error - kds * dq
 
     total_steps = int(duration / sim_dt)
     fall_thresh = 0.25
@@ -331,7 +360,10 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
         # boundary below.
         _push_obs_history()
         if step % decimation == 0:
-            if is_bdx:
+            if is_walk_clean_clk:
+                ext_clock.update(cmd_freq)
+                obs_now = get_obs_walk_clean_clk()
+            elif is_bdx:
                 ext_clock.update(cmd_freq)
                 obs_now = get_obs_bdx()
             elif is_bdxr:
@@ -357,6 +389,13 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
 
             if action_mode == 'increment':
                 current_joint_act[:] += joint_out * policy_dt
+            elif action_mode == 'residual':
+                # offset → ref + offset (lowpass on offset before adding ref)
+                if lp_alpha < 1.0:
+                    lp_target[:] = lp_alpha * joint_out + (1.0 - lp_alpha) * lp_target
+                else:
+                    lp_target[:] = joint_out
+                current_joint_act[:] = ref_joint + lp_target
             else:
                 if lp_alpha < 1.0:
                     lp_target[:] = lp_alpha * joint_out + (1.0 - lp_alpha) * lp_target
@@ -729,6 +768,48 @@ def print_report(csv_path):
         print(sep2)
         print('  Δ = backward − forward  (positive = backward is worse)')
 
+    # ── Walking quality verdict ─────────────────────────────────────────────
+    # Surfaces shuffle-gait failures: a policy can hit 100% survival while
+    # taking 4 cm steps with 92% double-support. Survival alone is misleading;
+    # this section spells out *how* the robot is surviving.
+    fwd_ok = df[(df['friction'] <= 1.5) & (df['cmd_vx'] > 0) & (df['survived'] == 1)]
+    if not fwd_ok.empty and 'stride_length' in fwd_ok.columns:
+        stride = fwd_ok['stride_length'].mean()
+        duty   = fwd_ok['duty_factor'].mean()
+        mfreq  = fwd_ok['measured_freq'].mean()
+        cmd_mu = fwd_ok['cmd_vx'].abs().mean()
+        bias   = fwd_ok['vx_bias_body'].abs().mean() if 'vx_bias_body' in fwd_ok else float('nan')
+        surv   = df[(df['friction'] <= 1.5) & (df['cmd_vx'] > 0)]['survived'].mean()
+
+        bias_rel = bias / max(cmd_mu, 1e-6) if not math.isnan(bias) else float('nan')
+
+        # Tag each axis pass/fail by absolute thresholds
+        def _tag(name, val, ok):
+            mark = '✓' if ok else '✗'
+            return f'  {mark} {name:<14} {val}'
+
+        stride_ok = stride >= 0.08
+        duty_ok   = duty   <= 0.65
+        bias_ok   = (not math.isnan(bias_rel)) and bias_rel <= 0.35
+        surv_ok   = surv   >= 0.90
+
+        shuffle = surv_ok and (not stride_ok or not duty_ok)
+        verdict = (
+            'SHUFFLING — survives but barely moves' if shuffle
+            else 'COLLAPSING — falls'                 if not surv_ok
+            else 'WALKING — real gait, tracks cmd'    if (stride_ok and duty_ok and bias_ok)
+            else 'WEAK WALK — gait present but tracking poor'
+        )
+
+        print('\n── Walking quality verdict (fwd, friction≤1.5) ──')
+        print(_tag('survival',   f'{surv*100:5.1f}%   (≥90% expected)', surv_ok))
+        print(_tag('stride',     f'{stride*100:5.1f} cm  (≥8 cm expected)', stride_ok))
+        print(_tag('duty',       f'{duty:5.3f}    (≤0.65 expected — 0.5 ideal alternation)', duty_ok))
+        if not math.isnan(bias):
+            print(_tag('vx_bias',    f'{bias*100:5.1f} cm/s ({bias_rel*100:4.0f}% of cmd, ≤35% expected)', bias_ok))
+        print(f'  → step freq {mfreq:.2f} Hz')
+        print(f'  Verdict: {verdict}')
+
 
 def make_plots(csv_path):
     if not HAS_MPL:
@@ -880,6 +961,11 @@ def quick_eval(onnx_path, sim_cfg,
         sim2sim/stride_length        — |vx_body| × leg_period (distance per stride)
         sim2sim/stride_asymm         — |T_L - T_R| / mean (L/R timing asymmetry)
         sim2sim/cot_fr{f}            — per-friction cost of transport
+
+        Composite (combines survival + gait quality so a shuffle-gait policy
+        that survives but barely moves no longer dominates ckpt selection):
+        sim2sim/walk_quality   — 0..1 score: survival × (stride, duty, vx_bias)
+        sim2sim/shuffle_flag   — 1.0 if policy survives but stride<6cm or duty>0.70
     """
     cfg = dict(sim_cfg)
     cfg['policy_path'] = onnx_path
@@ -946,6 +1032,28 @@ def quick_eval(onnx_path, sim_cfg,
         metrics['sim2sim/landing_vz_peak']  = float(np.nanmean([r['landing_vz_peak']  for r in fwd]))
         metrics['sim2sim/stride_length']    = float(np.nanmean([r['stride_length']    for r in fwd]))
         metrics['sim2sim/stride_asymm']     = float(np.nanmean([r['stride_asymm']     for r in fwd]))
+
+        # Composite walk_quality score — exposes shuffle-gait policies that
+        # 100%-survive but barely move (e.g. walk_noclock_v5 had stride 4cm /
+        # duty 0.92 / vx_bias 0.23 m/s when cmd_vx=0.3). One scalar to rank
+        # checkpoints by *true* walking, not survival.
+        surv_score = float(np.mean([r['survive_time'] for r in fwd])) / max(duration, 1e-6)
+        stride = metrics['sim2sim/stride_length']
+        duty   = metrics['sim2sim/duty_factor']
+        bias   = abs(metrics['sim2sim/vx_bias_fwd']) if not math.isnan(metrics['sim2sim/vx_bias_fwd']) else 0.0
+        cmd_mag = max(0.1, float(np.mean([abs(r['cmd_vx']) for r in fwd])))
+        stride_score = max(0.0, min(1.0, stride / 0.10))                      # 0 @ 0cm, 1 @ 10cm
+        duty_score   = max(0.0, min(1.0, (0.65 - duty) / 0.15))               # 1 @ ≤0.50, 0 @ ≥0.65
+        bias_score   = max(0.0, min(1.0, 1.0 - bias / cmd_mag))               # 1 if tracked, 0 if doubled cmd
+        walk_quality = surv_score * (0.4 * stride_score + 0.3 * duty_score + 0.3 * bias_score)
+        metrics['sim2sim/walk_quality'] = float(walk_quality)
+
+        # Shuffle flag: survives but doesn't truly walk
+        shuffle = (surv_score > 0.9) and ((duty > 0.70) or (stride < 0.06))
+        metrics['sim2sim/shuffle_flag'] = float(shuffle)
+    else:
+        metrics['sim2sim/walk_quality'] = 0.0
+        metrics['sim2sim/shuffle_flag'] = 0.0
 
     # Per-friction CoT (forward, survived) — energy efficiency vs surface
     for fr in frictions:

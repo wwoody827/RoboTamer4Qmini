@@ -45,6 +45,8 @@ def build_manifest(params):
             'inc_high': _to_list(action_cfg.get('inc_high_ranges')),
             'abs_low': _to_list(action_cfg.get('abs_low_ranges')),
             'abs_high': _to_list(action_cfg.get('abs_high_ranges')),
+            'residual_low': _to_list(action_cfg.get('residual_low_ranges')),
+            'residual_high': _to_list(action_cfg.get('residual_high_ranges')),
         },
         'ref_joint_pos': action_cfg.get('ref_joint_pos'),
         'pd_gains': {

@@ -46,7 +46,9 @@ class BIRLTask(NullTask):
         if self._phase_mode == 'input':
             _freq_lo = getattr(_phase_cfg, 'freq_low', 2.0) or 2.0
             _freq_hi = getattr(_phase_cfg, 'freq_high', 3.0) or 3.0
-            _freq_default = getattr(_phase_cfg, 'freq_default', 0.5 * (_freq_lo + _freq_hi))
+            _freq_default = getattr(_phase_cfg, 'freq_default', None)
+            if _freq_default is None:
+                _freq_default = 0.5 * (_freq_lo + _freq_hi)
             self._freq_low = float(_freq_lo)
             self._freq_high = float(_freq_hi)
             self._freq_default = float(_freq_default)
@@ -104,16 +106,23 @@ class BIRLTask(NullTask):
         else:
             self._ext_clock = None
 
-        # --- Action mode: increment or absolute (BD_X style) ---
+        # --- Action mode: increment, absolute, or residual ---
         self._action_mode = self.cfg.action.action_mode
-        assert self._action_mode in ('increment', 'absolute'), \
-            f"Unknown action.action_mode: '{self._action_mode}'. Must be 'increment' or 'absolute'."
+        assert self._action_mode in ('increment', 'absolute', 'residual'), \
+            f"Unknown action.action_mode: '{self._action_mode}'. Must be 'increment', 'absolute', or 'residual'."
 
         self._lp_alpha = getattr(self.cfg.action, 'action_lowpass_alpha', 1.0)
 
         if self._action_mode == 'increment':
             self.action_low = to_torch(self.cfg.action.inc_low_ranges, device=self.device)
             self.action_high = to_torch(self.cfg.action.inc_high_ranges, device=self.device)
+        elif self._action_mode == 'residual':
+            # Residual mode: joint_target = ref + scaled_offset. action_low/high define
+            # the symmetric offset band around ref (e.g., ±0.5 rad).
+            res_low = self.cfg.action.residual_low_ranges
+            res_high = self.cfg.action.residual_high_ranges
+            self.action_low = to_torch(res_low, device=self.device)
+            self.action_high = to_torch(res_high, device=self.device)
         else:
             # Absolute mode: scale network output to joint position range.
             # Use abs_low/high_ranges if set, otherwise fall back to URDF limits.
@@ -145,8 +154,12 @@ class BIRLTask(NullTask):
 
         self.current_joint_act = to_torch(self.env.default_dof_pos, device=self.device).repeat(self.num_envs, 1)
         self.previous_joint_act = self.current_joint_act.clone()
-        # Lowpass filter target (absolute mode only)
-        self._lp_target = self.current_joint_act.clone()
+        # Lowpass filter state. For absolute: stores the position target.
+        # For residual: stores the offset (starts at zero so target = ref + 0 = ref).
+        if self._action_mode == 'residual':
+            self._lp_target = torch.zeros_like(self.current_joint_act)
+        else:
+            self._lp_target = self.current_joint_act.clone()
 
         self.ref_joint_action = to_torch(self.cfg.action.ref_joint_pos, device=self.device).repeat(self.num_envs, 1)
         self.joint_action_limit_low_over = torch.as_tensor(self.env.dof_pos_limits[:, 0]).repeat(self.num_envs, 1)
@@ -227,6 +240,13 @@ class BIRLTask(NullTask):
         # foot height reached during the current swing per leg. Sparse
         # reward fires at touchdown (=`_td_event`) for (peak/target - 1)².
         self._foot_peak_z = torch.zeros(self.num_envs, self.num_legs, dtype=torch.float, device=self.device)
+
+        # Last-touchdown world-frame xy position per foot, used by the
+        # stride_length reward (direct gradient toward LIPM-target step
+        # size — added in v11 after no v6-v10 config/form change unlocked
+        # stride past ~6 cm). Seeded to current foot position at reset so
+        # the first TD doesn't fire spuriously against stale state.
+        self._last_td_foot_xy = torch.zeros(self.num_envs, self.num_legs, 2, dtype=torch.float, device=self.device)
 
         # --- Reference clip state (populated by _load_ref_clips if paths provided) ---
         self._has_ref = False
@@ -627,6 +647,26 @@ class BIRLTask(NullTask):
             # Pairs: zero the third dim
             self.commands[env_ids[mode == 3], 2] = 0     # vx+vy → yaw=0
             self.commands[env_ids[mode == 4], 1] = 0     # vx+yaw → vy=0
+        elif regime == 'pure_fwd_stand':
+            # Discrete cmd: 50% pure stand (cmd_vx=0), 50% pure walk at vx_hi.
+            # vy and yaw are forced to 0 (Phase B forward-only training).
+            # Removes interpolation bias of uniform [0, vx_hi] sampling that
+            # caused walk_clean_v2 to specialize at mean cmd 0.15 instead of
+            # cmd 0.3 (release_eval @ cmd 0.3 showed only 33% survival).
+            is_stand = torch.rand(n, device=self.device) < 0.5
+            self.commands[env_ids[is_stand], 0] = 0.0
+            self.commands[env_ids[~is_stand], 0] = vx_hi
+            self.commands[env_ids, 1] = 0.0
+            self.commands[env_ids, 2] = 0.0
+        elif regime == 'pure_fwd_bwd_stand':
+            # Discrete cmd: 1/3 stand (cmd_vx=0), 1/3 forward (cmd_vx=vx_hi),
+            # 1/3 backward (cmd_vx=vx_lo). Extends pure_fwd_stand with backward.
+            mode = torch.randint(0, 3, (n,), device=self.device)
+            self.commands[env_ids[mode == 0], 0] = 0.0
+            self.commands[env_ids[mode == 1], 0] = vx_hi
+            self.commands[env_ids[mode == 2], 0] = vx_lo
+            self.commands[env_ids, 1] = 0.0
+            self.commands[env_ids, 2] = 0.0
         elif regime is not None:
             raise ValueError(f"Unknown command.regime: {regime!r}")
 
@@ -665,7 +705,12 @@ class BIRLTask(NullTask):
         self.joint_pos[env_ids] = self.env.joint_pos_his.delay(self.delay_joint_steps)[env_ids]
         self.current_joint_act[env_ids] = self.env.default_dof_pos
         self.previous_joint_act[env_ids] = self.current_joint_act[env_ids].clone()
-        self._lp_target[env_ids] = self.current_joint_act[env_ids].clone()
+        # Residual mode: _lp_target stores offset, reset to 0 (target = ref + 0).
+        # Absolute mode: stores position target, reset to current_joint_act.
+        if self._action_mode == 'residual':
+            self._lp_target[env_ids] = 0.0
+        else:
+            self._lp_target[env_ids] = self.current_joint_act[env_ids].clone()
 
         self.joint_pos_error = self.joint_act_for_pd - self.joint_pos
         self.phase_modulator.reset(convert_phi=self.convert_phi, env_ids=env_ids,
@@ -709,6 +754,11 @@ class BIRLTask(NullTask):
         self._held_air_delta[env_ids] = 0.0
         self._td_event[env_ids] = False
         self._td_swing_duration[env_ids] = 0.0
+
+        # Stride state: seed last_td_xy to current foot xy so the first
+        # touchdown after reset doesn't compute stride against stale data.
+        _xy0 = self.env.foot_pos[:, [0, 1, 3, 4]].view(self.num_envs, self.num_legs, 2)
+        self._last_td_foot_xy[env_ids] = _xy0[env_ids]
 
         # RSI: assign new clip and randomise start frame for reset envs
         if self._has_ref:
@@ -822,11 +872,25 @@ class BIRLTask(NullTask):
             self.joint_pos_error,
         ]
 
-        # Phase slots only for output mode
+        # Phase signals — PRIVILEGED for critic (actor doesn't see them in
+        # no-clock-in-obs setups). Critic needs the clock to predict value
+        # of foot_phase / foot_clr / foot_supt rewards (which depend on
+        # clock-derived swing/support masks). Without this, value loss
+        # stays high because clock is hidden Markov state from critic's
+        # perspective.
         if self._phase_mode == 'output':
             parts.extend([
                 self.pm_phase * self.static_flag,
                 (self.pm_f * 0.3 - 1.) * self.static_flag,
+            ])
+        elif self._phase_mode == 'input':
+            # External clock sin/cos per leg [n, 4] + frequency normalized
+            ext_phase = self._ext_clock.phase_with_offset    # [n, num_legs]
+            freq_norm = (self._cmd_freq * 0.3 - 1.0)         # [n, 1]
+            parts.extend([
+                torch.sin(ext_phase) * self.static_flag,
+                torch.cos(ext_phase) * self.static_flag,
+                freq_norm * self.static_flag,
             ])
 
         parts.extend([
@@ -901,6 +965,14 @@ class BIRLTask(NullTask):
         else:
             if self._action_mode == 'increment':
                 self.current_joint_act += joint_out * self.env.dt
+            elif self._action_mode == 'residual':
+                # joint_out is the OFFSET from ref. Target = ref + offset.
+                # Lowpass smooths the offset before adding.
+                if self._lp_alpha < 1.0:
+                    self._lp_target = self._lp_alpha * joint_out + (1.0 - self._lp_alpha) * self._lp_target
+                else:
+                    self._lp_target = joint_out
+                self.current_joint_act = self.ref_joint_action + self._lp_target
             else:
                 # Absolute mode: lowpass filter the raw position target
                 if self._lp_alpha < 1.0:
@@ -1052,6 +1124,20 @@ class BIRLTask(NullTask):
                 -torch.mean(_pose_err_sq / (_ps_std ** 2), dim=-1, keepdim=True)
             )                                                            # [n, 1] in [0, 1]
 
+        # v10 option: gate pose_speed by walking state. When walking, this
+        # term unconditionally rewards joint_pos ≈ ref_joint_pos — exactly
+        # what shuffle does. Setting pose_speed_walking_gate=0.0 disables
+        # it during walking (only enforces upright pose at standstill).
+        # NOTE: explicit None check; `getattr(...) or 1.0` would silently
+        # rewrite the intended `0.0` to `1.0` (truthiness bug — v15 hit
+        # this and ran with effective gate=1.0).
+        _gate_raw = getattr(self.cfg.reward, 'pose_speed_walking_gate', 1.0)
+        _ps_walking_gate = 1.0 if _gate_raw is None else float(_gate_raw)
+        if _ps_walking_gate != 1.0:
+            pose_speed_rew = pose_speed_rew * (
+                (1.0 - self.static_flag) + _ps_walking_gate * self.static_flag
+            )
+
         # BDX-R-MjLab style additional reward terms.
         #
         # `action_rate_l2`: ||action_t − action_{t-1}||²  — first-derivative
@@ -1170,17 +1256,49 @@ class BIRLTask(NullTask):
         base_acc_rew = -0.4 * reg_norm_inv * torch.norm((self.env.base_acc - to_torch([0, 0, 9.81], device=self.device)) * 0.1, dim=1, keepdim=True)
         base_acc_rew *= self.static_flag
 
-        vertical_vel_rew = torch.exp(-torch.clip(5. / lin_vel_x_norm, min=2., max=10.) * torch.norm(self.env.base_lin_vel[:, [2]], dim=1,
-                                                                           keepdim=True) ** 2)
-        vertical_vel_rew -= 0.2 * reg_norm_inv * torch.norm(self.env.base_lin_vel[:, [2]], dim=1, keepdim=True) * self.static_flag
+        # v10 option: cmd-gated bell at target |v_z| oscillation.
+        # Standing: minimize v_z (keep upright). Walking: peak around
+        # `vertical_vel_target_walk` (≈ stride / 2·swing_time, ~0.15 m/s
+        # at v=0.3). The legacy form (minimize v_z always) rewards
+        # pogo-free standstill in walk mode → contributes to shuffle.
+        # See docs/walking_physics_reference.md §5.
+        _vv_target = float(getattr(self.cfg.reward, 'vertical_vel_target_walk', 0.0) or 0.0)
+        if _vv_target > 0:
+            _vv_std_walk   = float(getattr(self.cfg.reward, 'vertical_vel_std_walk',   0.10) or 0.10)
+            _vv_std_static = float(getattr(self.cfg.reward, 'vertical_vel_std_static', 0.10) or 0.10)
+            _vz_mag = torch.norm(self.env.base_lin_vel[:, [2]], dim=1, keepdim=True)
+            _vv_walking = torch.exp(-((_vz_mag - _vv_target) / _vv_std_walk) ** 2)
+            _vv_static  = torch.exp(-((_vz_mag - 0.0)        / _vv_std_static) ** 2)
+            vertical_vel_rew = _vv_static * (1.0 - self.static_flag) + _vv_walking * self.static_flag
+        else:
+            vertical_vel_rew = torch.exp(-torch.clip(5. / lin_vel_x_norm, min=2., max=10.) * torch.norm(self.env.base_lin_vel[:, [2]], dim=1,
+                                                                               keepdim=True) ** 2)
+            vertical_vel_rew -= 0.2 * reg_norm_inv * torch.norm(self.env.base_lin_vel[:, [2]], dim=1, keepdim=True) * self.static_flag
 
         support_foot_index = torch.where(self.env.foot_frc >= 10., True, False)
         swing_foot_index = torch.where(self.env.foot_frc < 1., True, False)
 
-        foot_clear_rew = torch.sum(torch.logical_and(swing_foot_index, self.foot_swing_mask), dtype=torch.float, dim=1,keepdim=True) / self.num_legs
+        # Single-support gate — TRUE only when exactly ONE leg is in air and
+        # the other on the ground (proper anti-phase walking state).
+        # Removes the shuffle exploit: when both feet on ground (shuffle),
+        # foot_supt was firing trivially because every grounded foot has 50%
+        # chance of also matching its stance_mask. Gating by single-support
+        # forces "right leg right time AND the other leg also doing its job".
+        _l_air, _r_air = swing_foot_index[:, [0]], swing_foot_index[:, [1]]
+        _l_grd, _r_grd = support_foot_index[:, [0]], support_foot_index[:, [1]]
+        single_support_state = (
+            (_l_air & _r_grd) | (_r_air & _l_grd)
+        ).float()                                       # [n, 1], 1 iff single-support
 
-        foot_support_rew = torch.sum(torch.logical_and(support_foot_index, self.foot_support_mask), dtype=torch.float,dim=1,keepdim=True) / self.num_legs
-        foot_support_rew *= self.static_flag
+        foot_clear_rew = (
+            torch.sum(torch.logical_and(swing_foot_index, self.foot_swing_mask), dtype=torch.float, dim=1, keepdim=True)
+            / self.num_legs
+        ) * single_support_state
+
+        foot_support_rew = (
+            torch.sum(torch.logical_and(support_foot_index, self.foot_support_mask), dtype=torch.float, dim=1, keepdim=True)
+            / self.num_legs
+        ) * single_support_state * self.static_flag
         foot_clear_rew *= self.static_flag
 
         # Two formulations of foot height reward, selected by config:
@@ -1320,6 +1438,7 @@ class BIRLTask(NullTask):
         elif self._phase_mode == 'input':
             # BD_X: external clock guarantees anti-phase. Reward matching
             # actual foot contact to clock-defined swing/stance schedule.
+            # This drives CADENCE following (policy tries to step at clock rate).
             # foot_swing_mask is already set from ext_clock above.
             actual_swing = (self.env.foot_frc < 1.0)     # feet actually in air
             actual_support = (self.env.foot_frc >= 10.0)  # feet actually on ground
@@ -1330,6 +1449,24 @@ class BIRLTask(NullTask):
             foot_phase_rew = phase_match * self.static_flag
         else:
             foot_phase_rew = torch.zeros(self.num_envs, 1, device=self.device)
+
+        # single_support reward — XOR(left_contact, right_contact). Pure
+        # clock-free anti-phase signal. Rewards EXACTLY ONE foot in air at
+        # a time. Together with fwd_vel + air_time, replaces all clock-
+        # dependent rewards in v12 → v13 minimal intrinsic setup.
+        #
+        # Walk @ duty 0.60 → single_support ~0.80 of cycle → reward +0.60
+        # Shuffle @ duty 0.85 → single_support ~0.30 → reward -0.40
+        # Stomp-in-place @ duty 0.50 → single_support ~1.0 → reward +1.0
+        #   (STOMP avoided by fwd_vel pressure on body_vx)
+        in_air_pair = (self.env.foot_frc < 1.0)
+        on_ground_pair = (self.env.foot_frc >= 10.0)
+        _l_air,  _r_air  = in_air_pair[:, [0]],  in_air_pair[:, [1]]
+        _l_grd,  _r_grd  = on_ground_pair[:, [0]], on_ground_pair[:, [1]]
+        single_support_state = (
+            (_l_air & _r_grd) | (_r_air & _l_grd)
+        ).float()
+        single_support_rew = (2.0 * single_support_state - 1.0) * self.static_flag
 
         # Air time reward (cmd_freq-aware, held-value):
         # At each touchdown event, snapshot delta = (swing_dur - target_swing)
@@ -1383,8 +1520,18 @@ class BIRLTask(NullTask):
         _fc_cmd_threshold = float(getattr(self.cfg.reward, 'feet_clearance_cmd_threshold', 0.05) or 0.05)
         _cmd_active_clr = (_cmd_total > _fc_cmd_threshold).float()
         _foot_z_err = torch.abs(self.foot_height - _fc_l1_target)    # [n, 2]
+        # v10 option: replace foot_xy_vel multiplier (which silently weakens
+        # the penalty when feet are slow → rewards shuffle) with `in_air`
+        # mask (penalty active only during swing). Cleaner gradient.
+        _fc_l1_mask_mode = str(getattr(self.cfg.reward, 'feet_clearance_l1_mask', 'foot_xy_vel') or 'foot_xy_vel')
+        if _fc_l1_mask_mode == 'in_air':
+            _fc_l1_mask = (self.env.foot_frc < 1.0).float()
+        elif _fc_l1_mask_mode == 'none':
+            _fc_l1_mask = torch.ones_like(_foot_z_err)
+        else:  # 'foot_xy_vel' = legacy
+            _fc_l1_mask = _foot_xy_vel
         feet_clearance_l1 = -torch.sum(
-            _foot_z_err * _foot_xy_vel, dim=-1, keepdim=True
+            _foot_z_err * _fc_l1_mask, dim=-1, keepdim=True
         ) * _cmd_active_clr                                          # ≤ 0
 
         # BDX-R-MjLab peak-tracking foot swing height + soft landing.
@@ -1409,6 +1556,32 @@ class BIRLTask(NullTask):
             torch.zeros_like(self._foot_peak_z),
             self._foot_peak_z,
         )
+
+        # Stride length reward (v11+): at each foot touchdown, world-frame
+        # xy distance from previous TD of the same foot = stride length for
+        # that leg. Bell-shaped reward centered at the LIPM target (~0.12 m
+        # at v=0.3). Cmd-gated so a standing robot isn't penalised for not
+        # stepping. Gives the FIRST direct gradient toward physical stride
+        # — all prior foot rewards (phase, clearance, swing height, air
+        # time) are indirect proxies that the policy gamed via 4-6 cm
+        # micro-strides.
+        _stride_target = float(getattr(self.cfg.reward, 'stride_length_target', 0.0) or 0.0)
+        if _stride_target > 0:
+            _stride_std = float(getattr(self.cfg.reward, 'stride_length_std', 0.04) or 0.04)
+            _xy_now = self.env.foot_pos[:, [0, 1, 3, 4]].view(self.num_envs, self.num_legs, 2)
+            _stride_per_foot = torch.norm(_xy_now - self._last_td_foot_xy, dim=-1)   # [n, num_legs]
+            _stride_dev = (_stride_per_foot - _stride_target) / _stride_std
+            _stride_bell = torch.exp(-(_stride_dev ** 2))                            # [n, num_legs]
+            stride_length_rew = (
+                torch.sum(_stride_bell * self._td_event.float(), dim=-1, keepdim=True)
+                * self.static_flag
+            )
+            # Update last-TD position only at events (where mask is True)
+            self._last_td_foot_xy = torch.where(
+                self._td_event.unsqueeze(-1).expand_as(_xy_now), _xy_now, self._last_td_foot_xy
+            )
+        else:
+            stride_length_rew = torch.zeros(self.num_envs, 1, device=self.device)
 
         # BDX-R-MjLab soft_landing: at first_contact, penalise contact-force
         # magnitude. Drives the policy toward soft, controlled touchdowns
@@ -1487,6 +1660,8 @@ class BIRLTask(NullTask):
             pose_speed=pose_speed_rew * w.get('pose_speed', 0.0),
             feet_swing_height_peak=feet_swing_height_peak * w.get('feet_swing_height_peak', 0.0),
             soft_landing=soft_landing * w.get('soft_landing', 0.0),
+            stride_length=stride_length_rew * w.get('stride_length', 0.0),
+            single_support=single_support_rew * w.get('single_support', 0.0),
             action_rate_l2=action_rate_l2 * w.get('action_rate_l2', 0.0),
             body_ang_vel=body_ang_vel * w.get('body_ang_vel', 0.0),
             dof_pos_limits=dof_pos_limits * w.get('dof_pos_limits', 0.0),

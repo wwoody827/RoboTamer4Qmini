@@ -1,0 +1,83 @@
+# walk_clean_v2.yaml — fresh start with V2Task + v2_train.py.
+#
+# Stand-only task (cmd=0). Run with: python v2_train.py --config configs/walk_clean_v2.yaml --name <name>
+
+_base: base.yaml
+
+task:
+  cfg: V2
+  tilt_term_rad: 0.7
+  base_z_min: 0.2
+
+phase:
+  mode: none
+
+observation:
+  history: 5
+  skip: 2
+
+action:
+  action_mode: residual
+  action_lowpass_alpha: 0.75
+  residual_low_ranges:  [-0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5]
+  residual_high_ranges: [+0.5, +0.5, +0.5, +0.5, +0.5, +0.5, +0.5, +0.5, +0.5, +0.5]
+
+command:
+  lin_vel_x_range:   [0.0, 0.0]
+  lin_vel_y_range:   [0.0, 0.0]
+  ang_vel_yaw_range: [0.0, 0.0]
+  resampling_time:   5.0
+
+# Minimal DR — only friction (different floors are real). Everything else off
+# so the policy can find a TRUE static stand instead of "move-to-stay-upright"
+# strategies that exploit DR perturbations. Sensor latency (delay_observation)
+# kept on as it's intrinsic to real hardware, not a DR augmentation.
+domain_rand:
+  randomize_friction:  true
+  friction_range:      [0.7, 1.5]    # only DR knob alive
+  randomize_mass:      false
+  randomize_damping:   false
+  randomize_torque:    false
+  torque_noise_std:    0.0
+  randomize_gains:     false
+  push_robots:         false         # critical — pushes were forcing spin-balance
+  delay_observation:   true          # KEEP — real sensor latency 10-40ms
+noise_values:
+  randomize_noise:     false         # OFF — clean sensors
+
+reward:
+  # 13 terms — see env/tasks/v2_task.py REWARD_NAMES for layout.
+  target_z:          0.45
+  height_scale:      0.04           # 2.5× tighter; 1cm off = 50% reward
+  upright_scale:     0.30
+  lin_vel_scale:     0.05           # 5× tighter; kills slow body sway
+  ang_vel_scale:     0.20           # bell for fine yaw tracking
+  yaw_lock_scale:    1.0            # rad/s — L2 penalty saturates at yaw=1, gradient everywhere
+  body_lock_scale:   1.0            # rad/s — L2 for combined roll/pitch rate
+  foot_slip_scale:   0.05           # m/s — planted foot must be stationary
+  foot_rot_scale:    0.30           # rad/s — planted foot must not pivot
+  drift_scale:       0.20           # m — episode-start anchor (decays beyond 20cm)
+  contact_threshold: 5.0            # N — foot is "in contact" above this
+  w_height:          2.0
+  w_upright:         2.0
+  w_lin_vel:         2.0
+  w_ang_vel:         1.0
+  w_yaw_lock:        2.0            # L2 form: -1 at yaw=1, -0.25 at yaw=0.5
+  w_body_lock:       3.0            # L2 on rp_avel: stops pitch/roll hovering
+  w_foot_slip:       1.5
+  w_foot_rot:        1.5
+  w_drift:           2.0
+  w_joint_vel:       3.0            # 3× to actually constrain motion
+  w_torque:          1.0
+  w_smooth:          1.0
+  w_term:           50.0
+
+policy:
+  hidden_layers: [512, 256]
+  activation: relu
+  init_noise_std: 0.5
+
+algorithm:
+  entropy_coef:        0.0005
+  num_learning_epochs: 3
+  discount_factor:     0.995

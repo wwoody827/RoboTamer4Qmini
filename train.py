@@ -290,7 +290,19 @@ def train():
                         f'fr{k.split("fr")[1]}={v:.1f}s' for k, v in _metrics.items()
                         if 'survive_time' in k
                     )
-                    print(f'[sim2sim@{it}] {_surv_str}  '
+                    # Lead with walking quality (catches shuffle-gait failures);
+                    # survival and tracking errors follow as supporting detail.
+                    _wq      = _metrics.get("sim2sim/walk_quality",  float("nan"))
+                    _shuffle = _metrics.get("sim2sim/shuffle_flag",  float("nan"))
+                    _stride  = _metrics.get("sim2sim/stride_length", float("nan"))
+                    _duty    = _metrics.get("sim2sim/duty_factor",   float("nan"))
+                    _bias    = _metrics.get("sim2sim/vx_bias_fwd",   float("nan"))
+                    _tag     = ' SHUFFLE!' if _shuffle == 1.0 else ''
+                    print(f'[sim2sim@{it}] quality={_wq:.2f}{_tag}  '
+                          f'stride={_stride*100:.1f}cm  '
+                          f'duty={_duty:.2f}  '
+                          f'vx_bias={_bias:+.3f}  '
+                          f'| {_surv_str}  '
                           f'vx_err fwd={_metrics.get("sim2sim/vx_err_fwd", float("nan")):.3f} '
                           f'bwd={_metrics.get("sim2sim/vx_err_bwd", float("nan")):.3f}  '
                           f'yaw_err={_metrics.get("sim2sim/yaw_err", float("nan")):.3f}  '

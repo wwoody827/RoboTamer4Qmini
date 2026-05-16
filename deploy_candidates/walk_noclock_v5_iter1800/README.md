@@ -78,6 +78,26 @@ limits. Same as walk_v34 / walk_rl_v4. PD gains identical (`policy_manifest.yaml
 
 Total: **40 / 40 s (100 %)**.
 
+## ⚠️ Caveat: this policy SHUFFLES (do not deploy as-is)
+
+Survival was the only metric tracked during this run. Forensic gait-quality
+sweep at fr=1.0, cmd_vx=0.3 revealed:
+
+| Metric         | walk_rl_v4 (with clock) | walk_noclock_v5 |
+|----------------|-------------------------|-----------------|
+| stride_length  | 0.142 m                 | **0.042 m**     |
+| duty_factor    | 0.530 (alternating)     | **0.918** (almost always double-support) |
+| measured_freq  | 2.50 Hz                 | 1.51 Hz         |
+| vx_bias_body   | 0.054 m/s               | **0.232 m/s** (only 0.07 actual when cmd 0.30) |
+
+v5 satisfies the phase-clock reward by twitching its feet without actually
+translating the body — a classic shuffle exploit. Survival is real, walking
+is not. The `walk_noclock_v6` config bumps foot_phase / feet_swing_height_peak /
+feet_clearance_l1 weights to force real swing.
+
+Use this checkpoint as a baseline curve in TB (`sim2sim/walk_quality` shows
+the shuffle), not as a deployable artifact.
+
 ## Caveats
 
 - Trained with **stage-0 cmd ranges** (lin_x ±0.4, lin_y ±0.1, yaw ±0.3) — the
@@ -85,8 +105,8 @@ Total: **40 / 40 s (100 %)**.
   distribution.
 - Not tested across the full walk_rl_v4 grid (lin_x ±0.5, lin_y ±0.3, yaw ±0.5)
   because most of those values are out of training distribution.
-- This is the first successful no-clock variant; further training with
-  curriculum-expanded cmd ranges would unlock wider cmd coverage.
+- This is the first no-clock variant that *survives* — the v6 config attempts
+  to make it also *walk*.
 
 ## Run
 

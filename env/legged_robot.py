@@ -53,8 +53,6 @@ class LeggedRobotEnv:
         sim_device_type, self.sim_device_id = gymutil.parse_device_str(self.sim_device)
         self.device = self.sim_device if sim_device_type == 'cuda' and sim_params.use_gpu_pipeline else 'cpu'
         self.graphics_device_id = -1 if not self.render else self.sim_device_id  # graphics device for rendering, -1 for no rendering
-        self.joint_tor_offset = torch.tensor([0.6, 1, 0., 0.7, 0.] + [-0.6, -1, -0., -0.7, 0.], dtype=torch.float, device=self.device)
-        self.joint_vel_sign = torch.tensor([0., 1, 0., 0., 0.] * 2, dtype=torch.float, device=self.device)
         self.height_samples = None
         self.up_axis_idx = 2  # 2 for z, 1 for y -> adapt gravity accordingly
         self.num_envs = self.cfg.runner.num_envs
@@ -167,6 +165,25 @@ class LeggedRobotEnv:
             self.torques = self.torques + tau_noise_std * torch.randn_like(self.torques)
         if self.cfg.domain_rand.randomize_torque or tau_noise_std > 0.0:
             self.torques = torch.clip(self.torques, -self.torque_limits, self.torque_limits)
+
+        # Fake actuator-bandwidth low-pass on the output torque (cheap proxy
+        # for the ETH ANYmal-style actuator network without the real-robot
+        # data collection step). One-pole LP at sim rate (1 ms): α = 0.10 →
+        # ~17 Hz cutoff; α = 0.05 → ~8 Hz. The hypothesis is that real
+        # motor electrical inductance + reducer non-linearities attenuate
+        # high-freq torque commands, so a policy doing 30 Hz micro-tremor
+        # to shuffle would get its torque squashed in sim and lose reward.
+        # See docs/actuator_network_plan.md for the full motivation.
+        _tau_lp_alpha = float(getattr(self.cfg.domain_rand, 'torque_lp_alpha', 1.0) or 1.0)
+        if _tau_lp_alpha < 1.0:
+            if not hasattr(self, '_torque_lp_state'):
+                self._torque_lp_state = torch.zeros_like(self.torques)
+            self.torques = (
+                _tau_lp_alpha * self.torques
+                + (1.0 - _tau_lp_alpha) * self._torque_lp_state
+            )
+            self._torque_lp_state = self.torques.clone()
+
         self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(self.torques))
         self.gym.simulate(self.sim)
         ### refresh dof state
@@ -424,9 +441,18 @@ class LeggedRobotEnv:
         Returns:
             [torch.Tensor]: Torques sent to the simulation
         """
+        # Standard PD: τ = kp_eff * (target - q) - kd_eff * dq.
+        # Previous formula had `+ kd - 1.0*dq + tor_offset - 3.5*sign(dq)*vel_sign`
+        # which added kd as a constant Nm bias and used gain=1 (not kd) on dq,
+        # plus an asymmetric tor_offset (±1 Nm on hip_roll) and Coulomb friction
+        # only on hip_roll. Those biases caused net non-zero torque at the ref
+        # equilibrium → robot drifts in passive PD test → sim2sim gap (training
+        # policy compensated for them in Isaac, MuJoCo physics didn't tolerate).
         error = joint_action - self.joint_pos
-        torques = self.p_gains * self.p_gains_rand * error + self.d_gains - self.d_gains_rand * self.joint_vel + self.joint_tor_offset - 3.5 * torch.sign(self.joint_vel) * self.joint_vel_sign
-        return torch.clip(torques, - self.torque_limits, self.torque_limits).view(self.torques.shape)
+        kp_eff = self.p_gains * self.p_gains_rand
+        kd_eff = self.d_gains * self.d_gains_rand
+        torques = kp_eff * error - kd_eff * self.joint_vel
+        return torch.clip(torques, -self.torque_limits, self.torque_limits).view(self.torques.shape)
 
     # ------------- Reset --------------
     def _reset_dofs(self, env_ids):
@@ -452,8 +478,10 @@ class LeggedRobotEnv:
             self._rsi_pending_envs = env_ids
         else:
             if not self.render and self.cfg.init_state.random_rot:
-                reset_dof_pos_noise = 0.1 * (2 * torch.ones_like(self.joint_pos[env_ids]) - 1.)
-                reset_dof__vel_noise = 2. * (2 * torch.ones_like(self.joint_vel[env_ids]) - 1.)
+                # Was using torch.ones_like (constant +0.1 offset, NOT random).
+                # Fixed to rand_like → uniform noise in ±0.1 rad.
+                reset_dof_pos_noise = 0.1 * (2 * torch.rand_like(self.joint_pos[env_ids]) - 1.)
+                reset_dof__vel_noise = 2. * (2 * torch.rand_like(self.joint_vel[env_ids]) - 1.)
             else:
                 reset_dof_pos_noise = 0
                 reset_dof__vel_noise = 0
