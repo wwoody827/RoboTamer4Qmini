@@ -156,15 +156,20 @@ Final iter 4000 in MuJoCo (see `/tmp/v2_videos/v2_run16_iter4000_stand_mujoco.mp
 
 ```
  t      x      y      z   roll  pitch    yaw   vx   vy
- 1.0  -0.054  -0.011  0.380   3.3°  -4.0°  -25°   .03  .02
- 2.0  -0.072   0.000  0.382   1.4°  -6.3°   -2°   .03  .00
- 3.0  -0.069   0.001  0.381   1.5°  -6.0°   -5°   .01  .00
+ 1.0  -0.026  -0.025  0.398   3.3°  -4.0°  -25°   .03  .02
+ 2.0  -0.040  -0.002  0.401   1.4°  -6.3°   -2°   .03  .00
+ 3.0  -0.038  -0.003  0.400   1.5°  -6.0°   -5°   .01  .00
  ...
-10.0  -0.068   0.002  0.381   1.3°  -6.0°   -5°   .00  .00
+10.0  -0.037  -0.002  0.400   1.3°  -6.0°   -5°   .00  .00
 ```
 
 After t=2 s the robot is essentially frozen in pose (pitch −6° constant
 lean, yaw locked at −5°, zero velocity). No fall, no drift.
+
+z is the IMU body world position to match training (env.base_pos in
+Isaac reads IMU, not base_link). Isaac reports base_z ≈ 0.420 m; MuJoCo
+0.400 m — the remaining ~2 cm is contact stiffness (PhysX softer, MuJoCo
+harder, mesh penetration differs).
 
 ## 4. Bugs and lessons
 

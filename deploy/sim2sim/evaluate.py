@@ -414,7 +414,9 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
         peak_tau   = max(peak_tau,   float(abs_tau.max()))
         peak_ratio = max(peak_ratio, float((abs_tau / effort_limits).max()))
 
-        z = data.qpos[2]
+        # IMU body z (matches training's env.base_pos[:, 2]); fall back to
+        # root z if IMU not present.
+        z = data.xpos[imu_body_id][2] if imu_body_id >= 0 else data.qpos[2]
         if z < fall_thresh:
             survived = False
             survive_steps = step
@@ -441,7 +443,7 @@ def run_episode(cfg, cmd_vx, cmd_yaw, floor_friction, duration, seed=None, cmd_v
             vx_body_samples.append((t_now, vx_body))
             vy_body_samples.append((t_now, vy_body))
             yaw_rate_samples.append((t_now, float(data.qvel[5])))
-            base_z_samples.append((t_now, float(data.qpos[2])))
+            base_z_samples.append((t_now, float(z)))
             yaw_samples.append((t_now, float(yaw_world)))
             # Contact forces: iterate contact list (cfrc_ext isn't auto-populated
             # in MuJoCo 3). Aggregate per foot body.

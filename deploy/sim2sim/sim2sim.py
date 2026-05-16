@@ -871,7 +871,12 @@ def run(cfg, cmd_vx=None, cmd_vy=None, cmd_yaw=None, cmd_freq=None, duration=Non
             if stand_only:
                 print(f"{t:6.1f}  (fixed base — standing pose)")
             else:
-                x, y, z = data.qpos[0], data.qpos[1], data.qpos[2]
+                # Report IMU body pos (matches training's env.base_pos), not
+                # root/qpos which is the base_link origin (~1.5cm below IMU).
+                if imu_body_id >= 0:
+                    x, y, z = data.xpos[imu_body_id][0], data.xpos[imu_body_id][1], data.xpos[imu_body_id][2]
+                else:
+                    x, y, z = data.qpos[0], data.qpos[1], data.qpos[2]
                 quat = data.xquat[imu_body_id]  # [w,x,y,z]
                 euler = quat_to_euler_xyz(quat)
                 vx_act = data.qvel[0]
