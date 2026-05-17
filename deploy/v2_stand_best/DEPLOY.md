@@ -1,6 +1,6 @@
 # V2 Stand Policy — SDK Deploy Spec
 
-**Policy**: `policy.onnx` (v2_run25 iter 2800, MuJoCo-verified 15s+ stable, drift <3cm)
+**Policy**: `policy.onnx` (v2_run26 iter 2600, MuJoCo-verified 15s zero motion after t=2s, drift <6cm)
 **Manifest**: `manifest.yaml` (source of truth — values below are for documentation; SDK should load from manifest)
 
 Task: **stand still** (commanded velocity = 0). No walking, no turning.
