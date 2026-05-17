@@ -58,15 +58,10 @@ domain_rand:
   gains_range:          [0.95, 1.05]  # ±5% PD gains
   push_robots:          false         # KEEP OFF — wide pushes train spin-balance
   delay_observation:    true          # real sensor latency 10–40 ms
-noise_values:
-  randomize_noise:      true
-  lin_vel:              0.05
-  gravity:              0.02
-  ang_vel:              0.30          # bumped 0.05→0.30 (base default) — close sim2sim gap on rate channel
-  foot_frc:             1.0
-  dof_pos:              0.015
-  dof_vel:              1.2           # bumped 0.2→1.2 (base default) — most impactful sensor for joint state estimation
-  base_acc:             0.5
+# Sensor noise: use base.yaml defaults (lin_vel 0.3, gravity 0.15, ang_vel 0.3,
+# foot_frc 5.0, dof_pos 0.1, dof_vel 1.2, base_acc 3.0). Previously cut 5-6×
+# while diagnosing sim2sim gap — now that gap is solved by `terrain.plane`,
+# full noise gives sim2real margin without breaking training.
 
 reward:
   # 15 terms — see env/tasks/v2_task.py REWARD_NAMES for layout.
