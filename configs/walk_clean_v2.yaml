@@ -28,51 +28,66 @@ command:
   ang_vel_yaw_range: [0.0, 0.0]
   resampling_time:   5.0
 
-# Minimal DR — only friction (different floors are real). Everything else off
-# so the policy can find a TRUE static stand instead of "move-to-stay-upright"
-# strategies that exploit DR perturbations. Sensor latency (delay_observation)
-# kept on as it's intrinsic to real hardware, not a DR augmentation.
+# DR — narrow ranges for sim2real robustness without forcing the policy
+# into "move-to-stay-upright" strategies (which is what wide push DR did).
+# push_robots stays off (it was the spin-balance trigger). Everything else
+# is back on at conservative ±5–10% ranges.
 domain_rand:
-  randomize_friction:  true
-  friction_range:      [0.7, 1.5]    # only DR knob alive
-  randomize_mass:      false
-  randomize_damping:   false
-  randomize_torque:    false
-  torque_noise_std:    0.0
-  randomize_gains:     false
-  push_robots:         false         # critical — pushes were forcing spin-balance
-  delay_observation:   true          # KEEP — real sensor latency 10-40ms
+  randomize_friction:   true
+  friction_range:       [0.7, 1.5]
+  randomize_mass:       true
+  added_mass_range:     [0.9, 1.1]    # ±10% body-segment mass
+  added_inertia_range:  [0.9, 1.1]    # ±10% inertia
+  randomize_damping:    true
+  added_friction_range: [0.95, 1.05]  # ±5% joint friction
+  added_damping_range:  [0.9, 1.1]    # ±10% joint damping
+  randomize_torque:     true
+  torque_range:         [0.95, 1.05]  # ±5% actuator gain
+  torque_noise_std:     0.0
+  randomize_gains:      true
+  gains_range:          [0.95, 1.05]  # ±5% PD gains
+  push_robots:          false         # KEEP OFF — wide pushes train spin-balance
+  delay_observation:    true          # real sensor latency 10–40 ms
 noise_values:
-  randomize_noise:     false         # OFF — clean sensors
+  randomize_noise:      true
+  lin_vel:              0.05
+  gravity:              0.02
+  ang_vel:              0.30          # bumped 0.05→0.30 (base default) — close sim2sim gap on rate channel
+  foot_frc:             1.0
+  dof_pos:              0.015
+  dof_vel:              1.2           # bumped 0.2→1.2 (base default) — most impactful sensor for joint state estimation
+  base_acc:             0.5
 
 reward:
-  # 13 terms — see env/tasks/v2_task.py REWARD_NAMES for layout.
-  target_z:          0.45
-  height_scale:      0.04           # 2.5× tighter; 1cm off = 50% reward
-  upright_scale:     0.30
-  lin_vel_scale:     0.05           # 5× tighter; kills slow body sway
-  ang_vel_scale:     0.20           # bell for fine yaw tracking
-  yaw_lock_scale:    1.0            # rad/s — L2 penalty saturates at yaw=1, gradient everywhere
-  body_lock_scale:   1.0            # rad/s — L2 for combined roll/pitch rate
-  foot_geom_scale:   0.10           # m — per-dim mean foot xy deviation from ref (heading frame)
-  foot_slip_scale:   0.05           # m/s — planted foot must be stationary
-  foot_rot_scale:    0.30           # rad/s — planted foot must not pivot
-  drift_scale:       0.20           # m — episode-start anchor (decays beyond 20cm)
-  contact_threshold: 5.0            # N — foot is "in contact" above this
-  w_height:          2.0
-  w_upright:         2.0
-  w_lin_vel:         2.0
-  w_ang_vel:         1.0
-  w_yaw_lock:        2.0            # L2 form: -1 at yaw=1, -0.25 at yaw=0.5
-  w_body_lock:       3.0            # L2 on rp_avel: stops pitch/roll hovering
-  w_foot_geom:       2.0            # keep stance + foot yaw close to ref
-  w_foot_slip:       1.5
-  w_foot_rot:        1.5
-  w_drift:           2.0
-  w_joint_vel:       3.0            # 3× to actually constrain motion
-  w_torque:          1.0
-  w_smooth:          1.0
-  w_term:           50.0
+  # 15 terms — see env/tasks/v2_task.py REWARD_NAMES for layout.
+  target_z:                  0.45
+  base_height_scale:         0.08    # loosened 0.04→0.08 to tolerate ±5-10% physics DR
+  upright_scale:             0.30
+  linear_velocity_scale:     0.10    # loosened 0.05→0.10 (DR adds ~5cm/s wobble)
+  angular_velocity_scale:    0.20    # bell for fine yaw tracking
+  yaw_rate_lock_scale:       1.0     # rad/s — L2 penalty saturates at yaw=1, gradient everywhere
+  body_rate_lock_scale:      1.0     # rad/s — L2 for combined roll/pitch rate
+  foot_geometry_scale:       0.10    # m — per-dim mean foot xy deviation from ref (heading frame)
+  pose_match_scale:          2.5     # rad — relaxed 1.5→2.5: lifting a leg (err²≈0.5) costs only 0.24 reward instead of 0.6
+  foot_slip_scale:           0.10    # m/s — loosened 0.05→0.10 for DR tolerance
+  foot_rotation_scale:       0.30    # rad/s — planted foot must not pivot
+  xy_drift_scale:            0.20    # m — episode-start anchor (decays beyond 20cm)
+  contact_threshold:         5.0     # N — foot is "in contact" above this
+  w_base_height:             2.0
+  w_upright:                 2.0
+  w_linear_velocity:         2.0
+  w_angular_velocity:        1.0
+  w_yaw_rate_lock:           2.0     # L2 form: -1 at yaw=1, -0.25 at yaw=0.5
+  w_body_rate_lock:          3.0     # L2 on rp_avel: stops pitch/roll hovering
+  w_foot_geometry:           2.0     # keep stance + foot yaw close to ref
+  w_pose_match:              3.0     # joint-space pull to ref (defeats squat local-min)
+  w_foot_slip:               1.5
+  w_foot_rotation:           1.5
+  w_xy_drift:                2.0
+  w_joint_velocity:          3.0     # 3× to actually constrain motion
+  w_torque:                  1.0
+  w_action_smoothness:       1.0
+  w_termination:            20.0     # 50→20 to weaken "long survival" red herring
 
 policy:
   hidden_layers: [512, 256]
