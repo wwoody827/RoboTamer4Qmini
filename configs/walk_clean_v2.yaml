@@ -9,6 +9,16 @@ task:
   tilt_term_rad: 0.7
   base_z_min: 0.2
 
+# Stand task uses a perfectly flat plane (matches MuJoCo deploy ground).
+# base.yaml default is `trimesh` with vertical_scale 0.01 → up to ~1cm of
+# numerical bumps even when terrain_proportions selects "flat" cells. That
+# biases the policy toward foot-tilt-locking strategies that catch corners
+# of the foot against bumps. The strategy is brittle and fails in MuJoCo's
+# clean plane (~5s then fall). Plane terrain here closes the gap — v2_run25
+# stands 15s+ in MuJoCo with <3cm drift.
+terrain:
+  mesh_type: plane
+
 phase:
   mode: none
 
