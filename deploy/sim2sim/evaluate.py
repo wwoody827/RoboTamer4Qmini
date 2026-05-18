@@ -1090,6 +1090,81 @@ def quick_eval(onnx_path, sim_cfg,
     return metrics
 
 
+def quick_eval_v2(onnx_path, sim_cfg,
+                  frictions=(0.7, 1.0, 1.5),
+                  runs=5,
+                  duration=15.0):
+    """Stand-only eval for V2 task.
+
+    Runs cmd=0 episodes at multiple friction levels. Returns scalar metrics
+    relevant to a stationary stand task — no velocity tracking, no walking
+    gait quality, no displacement scoring.
+
+    Returns dict with keys:
+      sim2sim/survive_time_fr{f}      — mean survive time at friction f
+      sim2sim/survive_rate_fr{f}      — fraction of runs reaching duration
+      sim2sim/xy_drift_final          — mean |xy_final| (m), averaged across all runs
+      sim2sim/xy_drift_final_max      — worst-case |xy_final|
+      sim2sim/pitch_rms_deg           — mean pitch RMS over survived runs (deg)
+      sim2sim/roll_rms_deg            — mean roll RMS over survived runs (deg)
+      sim2sim/com_z_rms               — mean CoM-z oscillation (m)
+      sim2sim/com_z_mean              — mean CoM-z (m) — should match target_z
+      sim2sim/yaw_drift_rate          — mean |yaw_rate| (rad/s); proxy for yaw locking
+      sim2sim/quality_score           — 0..1 composite: survival × (1−tilt/30°)
+    """
+    cfg = dict(sim_cfg)
+    cfg['policy_path'] = onnx_path
+
+    rows = []
+    for friction in frictions:
+        for run_i in range(runs):
+            m = run_episode(cfg, cmd_vx=0.0, cmd_yaw=0.0, floor_friction=friction,
+                            duration=duration, seed=run_i, cmd_vy=0.0)
+            rows.append({'friction': friction, **m})
+
+    if not rows:
+        return {}
+
+    metrics = {}
+
+    # Per-friction survival
+    for fr in frictions:
+        sub = [r for r in rows if r['friction'] == fr]
+        metrics[f'sim2sim/survive_time_fr{fr:.1f}'] = float(np.mean([r['survive_time'] for r in sub]))
+        metrics[f'sim2sim/survive_rate_fr{fr:.1f}'] = float(np.mean([1.0 if r['survived'] else 0.0 for r in sub]))
+
+    # Drift — |xy_final - 0| averaged across all runs (survived or not).
+    # We care about steady-state position lock, so include only survived runs
+    # to avoid mixing in fall-and-slide displacement.
+    survived = [r for r in rows if r['survived']]
+    if survived:
+        final_xys = [math.sqrt(r['x_final']**2 + r['y_final']**2) for r in survived]
+        metrics['sim2sim/xy_drift_final']     = float(np.mean(final_xys))
+        metrics['sim2sim/xy_drift_final_max'] = float(np.max(final_xys))
+        metrics['sim2sim/pitch_rms_deg']      = float(np.mean([math.degrees(r['pitch_rms']) for r in survived]))
+        metrics['sim2sim/roll_rms_deg']       = float(np.mean([math.degrees(r['roll_rms'])  for r in survived]))
+        metrics['sim2sim/com_z_rms']          = float(np.mean([r['com_z_rms']               for r in survived]))
+        metrics['sim2sim/com_z_mean']         = float(np.mean([r['com_z_mean']              for r in survived]))
+        metrics['sim2sim/yaw_drift_rate']     = float(np.mean([abs(r['yaw_drift_passive']) for r in survived
+                                                                if not math.isnan(r['yaw_drift_passive'])]))
+    else:
+        for k in ('xy_drift_final', 'xy_drift_final_max', 'pitch_rms_deg', 'roll_rms_deg',
+                  'com_z_rms', 'com_z_mean', 'yaw_drift_rate'):
+            metrics[f'sim2sim/{k}'] = float('nan')
+
+    # Quality score: avg survival × (1 - mean_tilt / 30°)
+    surv_score = float(np.mean([r['survive_time'] for r in rows])) / max(duration, 1e-6)
+    if survived:
+        mean_tilt_deg = float(np.mean([math.degrees(math.sqrt(r['pitch_rms']**2 + r['roll_rms']**2))
+                                        for r in survived]))
+        tilt_score = max(0.0, 1.0 - mean_tilt_deg / 30.0)
+    else:
+        tilt_score = 0.0
+    metrics['sim2sim/quality_score'] = surv_score * tilt_score
+
+    return metrics
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def main():

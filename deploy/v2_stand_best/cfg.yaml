@@ -1,0 +1,438 @@
+task:
+  cfg: V2
+  use_teacher_obs: false
+  foot_mask_mode: phase
+  ref_clip_paths: []
+  w_imit: 0.5
+  w_task: 0.5
+  tilt_term_rad: 0.7
+  base_z_min: 0.2
+phase:
+  mode: none
+  base_freq: 1.0
+  vel_scale: 1.0
+  support_ratio: 0.6
+observation:
+  history: 5
+  skip: 2
+  slots:
+  - commands_3
+  - base_euler
+  - base_ang_vel
+  - joint_pos_err
+  - joint_vel
+  - joint_tracking_err
+  - phase_sin_cos
+  - phase_freq
+viewer:
+  pos:
+  - 0
+  - 0
+  - 0.6
+  lookat:
+  - 0.0
+  - 0
+  - 0.6
+  fixed_robot_id: 0
+  fixed_offset:
+  - 0.0
+  - 2.0
+  - 0.6
+runner:
+  seed: 1
+  max_iterations: 4000
+  num_steps_per_env: 24
+  save_interval: 200
+  num_envs: 4096
+  env_spacing: 3.0
+  send_timeouts: true
+  episode_length_s: 10
+  use_mirror_augmentation: true
+  mirror_weight: 0.5
+policy:
+  name: simple_policy
+  num_actions: 10
+  num_critic_obs: 255
+  num_observations: 195
+  hidden_layers:
+  - 512
+  - 256
+  activation: relu
+  init_noise_std: 0.5
+algorithm:
+  value_loss_coef: 1.0
+  use_clipped_value_loss: true
+  eps_clip: 0.2
+  entropy_coef: 0.0005
+  num_learning_epochs: 3
+  num_mini_batches: 4
+  learning_rate: 0.001
+  schedule: adaptive
+  discount_factor: 0.995
+  gae_lambda: 0.95
+  desired_kl: 0.01
+  max_grad_norm: 1.0
+  normalize_value: false
+action:
+  action_mode: residual
+  action_lowpass_alpha: 0.75
+  action_limit_up: null
+  action_limit_low: null
+  high_ranges:
+  - 3.0
+  - 3.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  low_ranges:
+  - 0.5
+  - 0.5
+  - -1.0
+  - -1.0
+  - -1.0
+  - -1.0
+  - -1.0
+  - -1.0
+  - -1.0
+  - -1.0
+  - -1.0
+  - -1.0
+  ref_joint_pos:
+  - 0.4
+  - -0.1
+  - -1.5
+  - 1.0
+  - -1.3
+  - -0.4
+  - 0.1
+  - 1.5
+  - -1.0
+  - 1.3
+  inc_high_ranges:
+  - 10.0
+  - 10.0
+  - 10.0
+  - 10.0
+  - 10.0
+  - 10.0
+  - 10.0
+  - 10.0
+  - 10.0
+  - 10.0
+  inc_low_ranges:
+  - -10.0
+  - -10.0
+  - -10.0
+  - -10.0
+  - -10.0
+  - -10.0
+  - -10.0
+  - -10.0
+  - -10.0
+  - -10.0
+  abs_high_ranges: null
+  abs_low_ranges: null
+  use_actuator_delay: false
+  actuator_delay_range:
+  - 1
+  - 3
+  use_actuator_filter: false
+  actuator_filter_alpha_range:
+  - 0.3
+  - 0.7
+  residual_low_ranges:
+  - -0.5
+  - -0.5
+  - -0.5
+  - -0.5
+  - -0.5
+  - -0.5
+  - -0.5
+  - -0.5
+  - -0.5
+  - -0.5
+  residual_high_ranges:
+  - 0.5
+  - 0.5
+  - 0.5
+  - 0.5
+  - 0.5
+  - 0.5
+  - 0.5
+  - 0.5
+  - 0.5
+  - 0.5
+pd_gains:
+  decimation: 15
+  stiffness:
+    hip_yaw: 55.0
+    hip_roll: 105.0
+    hip_pitch: 75.0
+    knee: 45.0
+    ankle: 30.0
+  damping:
+    hip_yaw: 0.3
+    hip_roll: 2.5
+    hip_pitch: 0.3
+    knee: 0.5
+    ankle: 0.25
+init_state:
+  random_rot: true
+  num_legs: 2
+  pos:
+  - 0.0
+  - 0.0
+  - 0.45
+  rot:
+  - 0.0
+  - 0.0
+  - 0.0
+  - 1.0
+  lin_vel:
+  - 0.0
+  - 0.0
+  - 0.0
+  ang_vel:
+  - 0.0
+  - 0.0
+  - 0.0
+  reset_joint_pos:
+  - 0.4
+  - -0.1
+  - -1.5
+  - 1.0
+  - -1.3
+  - -0.4
+  - 0.1
+  - 1.5
+  - -1.0
+  - 1.3
+domain_rand:
+  randomize_friction: true
+  friction_range:
+  - 0.7
+  - 1.5
+  rest_offset_range:
+  - 0.0
+  - 0.0
+  randomize_mass: true
+  added_mass_range:
+  - 0.9
+  - 1.1
+  added_inertia_range:
+  - 0.9
+  - 1.1
+  randomize_damping: true
+  added_friction_range:
+  - 0.95
+  - 1.05
+  added_damping_range:
+  - 0.9
+  - 1.1
+  randomize_torque: true
+  torque_range:
+  - 0.95
+  - 1.05
+  torque_noise_std: 0.0
+  randomize_gains: true
+  gains_range:
+  - 0.95
+  - 1.05
+  push_robots: false
+  max_push_vel_xy: 0.5
+  max_push_rate_xyz: 0.5
+  push_interval_s: 3.0
+  delay_observation: true
+  delay_joint_ranges:
+  - 10
+  - 40
+  delay_rate_ranges:
+  - 20
+  - 50
+  delay_angle_ranges:
+  - 20
+  - 50
+noise_values:
+  randomize_noise: true
+  use_state_filter: false
+  lin_vel: 0.3
+  gravity: 0.15
+  ang_vel: 0.3
+  foot_frc: 5.0
+  dof_pos: 0.1
+  dof_vel: 1.2
+  base_acc: 3.0
+command:
+  curriculum: false
+  max_curriculum: 1.0
+  num_commands: 4
+  resampling_time: 5.0
+  heading_command: false
+  use_heading_reward: false
+  use_yaw_smooth_reward: false
+  lin_vel_x_range:
+  - 0.0
+  - 0.0
+  lin_vel_y_range:
+  - 0.0
+  - 0.0
+  ang_vel_yaw_range:
+  - 0.0
+  - 0.0
+  heading_range:
+  - 0.0
+  - 3.141592653589793
+terrain:
+  mesh_type: plane
+  horizontal_scale: 0.1
+  vertical_scale: 0.01
+  border_size: 5
+  static_friction: 1.0
+  dynamic_friction: 1.0
+  restitution: 0.05
+  measured_points_x:
+  - -0.05
+  - 0
+  - 0.05
+  measured_points_y:
+  - -0.05
+  - 0
+  - 0.05
+  curriculum: false
+  measure_heights: false
+  selected: false
+  terrain_kwargs: null
+  max_init_terrain_level: 3
+  terrain_length: 15
+  terrain_width: 15
+  num_rows: 20
+  num_cols: 20
+  terrain_proportions:
+  - 1.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  slope_treshold: 0.0
+sim:
+  dt: 0.001
+  substeps: 1
+  up_axis: 1
+  gravity:
+  - 0.0
+  - 0.0
+  - -9.81
+  physx:
+    solver_type: 1
+    num_threads: 10
+    num_position_iterations: 4
+    num_velocity_iterations: 0
+    contact_offset: 0.01
+    rest_offset: 0.0
+    bounce_threshold_velocity: 0.5
+    max_depenetration_velocity: 1.0
+    max_gpu_contact_pairs: 8388608
+    default_buffer_size_multiplier: 5
+    contact_collection: 2
+    use_gpu: true
+asset:
+  enable_bar: false
+  file: assets/q1/urdf/q1.urdf
+  imu_name: imu_in_torso
+  foot_name:
+  - ankle_pitch
+  base_name: base_link
+  penalize_contacts_on:
+  - knee
+  - hip
+  terminate_after_contacts_on:
+  - knee
+  - base
+  - hip
+  disable_gravity: false
+  collapse_fixed_joints: true
+  fix_base_link: false
+  default_dof_drive_mode: 3
+  self_collisions: 0
+  replace_cylinder_with_capsule: true
+  flip_visual_attachments: false
+  use_mesh_materials: true
+  density: 0.1
+  angular_damping: 0.0
+  linear_damping: 0.0
+  max_angular_velocity: 100.0
+  max_linear_velocity: 100.0
+  armature: 0.0
+  thickness: 0.01
+reward:
+  constant: 0.3
+  cmd_track_lp_alpha: 0.0
+  fwd_err_deadzone: 0.0
+  lateral_err_deadzone: 0.0
+  yaw_err_deadzone: 0.0
+  fwd_err_slope: 2.0
+  lateral_err_slope: 3.0
+  yaw_err_slope: 2.0
+  component_clip_min: -4.0
+  component_clip_max: 5.0
+  base_heit: 1.0
+  balance: 1.5
+  fwd_vel: 2.3
+  yaw_rat: 2.5
+  lateral_vel: 0.7
+  vertical_vel: 0.6
+  ang_vel: 0.6
+  twist: 2.5
+  base_acc: 0.1
+  foot_clr: 1.0
+  foot_supt: 0.7
+  foot_heit: 0.7
+  leg_width_rew: 0.5
+  act_const: 0.2
+  sa_const: 0.1
+  foot_phase: 0.3
+  jnt_pos_err: 0.2
+  act_smo: 1.5
+  net_smo: 0.001
+  net_out_val: 0.0001
+  foot_slip: 0.5
+  foot_vz: 0.2
+  foot_acc: 0.05
+  foot_sft: 2.7
+  jnt_vel: 0.003
+  feet_py: 0.5
+  feet_frc: 0.001
+  joint_tor: 0.001
+  pmf: 0.03
+  heading: 0.0
+  yaw_smooth: 0.0
+  power: 0.0
+  air_time: 0.0
+  target_z: 0.45
+  base_height_scale: 0.08
+  upright_scale: 0.3
+  linear_velocity_scale: 0.1
+  angular_velocity_scale: 0.2
+  angular_velocity_l2_weight: 1.0
+  body_rate_lock_scale: 1.0
+  pose_match_scale: 2.5
+  foot_slip_scale: 0.1
+  foot_rotation_scale: 0.3
+  contact_threshold: 5.0
+  w_base_height: 2.0
+  w_upright: 2.0
+  w_linear_velocity: 2.0
+  w_angular_velocity: 2.0
+  w_body_rate_lock: 3.0
+  w_pose_match: 3.0
+  w_foot_slip: 1.5
+  w_foot_rotation: 1.5
+  w_action_smoothness: 1.0
+  w_termination: 20.0

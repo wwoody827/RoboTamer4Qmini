@@ -64,33 +64,30 @@ domain_rand:
 # full noise gives sim2real margin without breaking training.
 
 reward:
-  # 15 terms — see env/tasks/v2_task.py REWARD_NAMES for layout.
+  # 10 terms — see env/tasks/v2_task.py REWARD_NAMES for layout.
+  # Removed (from original 15): foot_geometry (FK-redundant), xy_drift
+  # (walk-incompatible), torque (small/constant cost), joint_velocity
+  # (v32 ablation showed it's not critical), yaw_rate_lock (absorbed into
+  # angular_velocity via deeper L2 floor — see angular_velocity_l2_weight).
   target_z:                  0.45
   base_height_scale:         0.08    # loosened 0.04→0.08 to tolerate ±5-10% physics DR
   upright_scale:             0.30
   linear_velocity_scale:     0.10    # loosened 0.05→0.10 (DR adds ~5cm/s wobble)
-  angular_velocity_scale:    0.20    # bell for fine yaw tracking
-  yaw_rate_lock_scale:       1.0     # rad/s — L2 penalty saturates at yaw=1, gradient everywhere
+  angular_velocity_scale:    0.20    # bell on (yaw_rate-cmd_yaw)² + 0.3·rp_avel²
+  angular_velocity_l2_weight: 1.0    # deep L2 floor — at saturation gives -1.0 (absorbs yaw_rate_lock)
   body_rate_lock_scale:      1.0     # rad/s — L2 for combined roll/pitch rate
-  foot_geometry_scale:       0.10    # m — per-dim mean foot xy deviation from ref (heading frame)
   pose_match_scale:          2.5     # rad — relaxed 1.5→2.5: lifting a leg (err²≈0.5) costs only 0.24 reward instead of 0.6
   foot_slip_scale:           0.10    # m/s — loosened 0.05→0.10 for DR tolerance
   foot_rotation_scale:       0.30    # rad/s — planted foot must not pivot
-  xy_drift_scale:            0.20    # m — episode-start anchor (decays beyond 20cm)
   contact_threshold:         5.0     # N — foot is "in contact" above this
   w_base_height:             2.0
   w_upright:                 2.0
   w_linear_velocity:         2.0
-  w_angular_velocity:        1.0
-  w_yaw_rate_lock:           2.0     # L2 form: -1 at yaw=1, -0.25 at yaw=0.5
+  w_angular_velocity:        2.0     # bumped 1→2 so saturated L2 gives -2.0 (= old yaw_rate_lock)
   w_body_rate_lock:          3.0     # L2 on rp_avel: stops pitch/roll hovering
-  w_foot_geometry:           2.0     # keep stance + foot yaw close to ref
   w_pose_match:              3.0     # joint-space pull to ref (defeats squat local-min)
   w_foot_slip:               1.5
   w_foot_rotation:           1.5
-  w_xy_drift:                2.0
-  w_joint_velocity:          3.0     # 3× to actually constrain motion
-  w_torque:                  1.0
   w_action_smoothness:       1.0
   w_termination:            20.0     # 50→20 to weaken "long survival" red herring
 

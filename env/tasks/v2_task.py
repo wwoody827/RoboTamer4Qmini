@@ -70,16 +70,11 @@ REWARD_NAMES = (
     'base_height',         # exp(-((z - target_z)/σ)^2)                bounded (0,1]
     'upright',             # exp(-||g_xy||^2/σ^2)                      bounded (0,1]
     'linear_velocity',     # exp(-||v - v_cmd||^2/σ^2)                 bounded (0,1]
-    'angular_velocity',    # exp(-ang_err^2/σ^2)                       bounded (0,1]
-    'yaw_rate_lock',       # -clip(yaw_rate²/σ², 0, 1)                 L2: gradient everywhere
+    'angular_velocity',    # robust_bell w/ strong L2 floor (l2_w=1.0) — replaces yaw_rate_lock
     'body_rate_lock',      # -clip(rp_avel²/σ², 0, 1)                  L2: stops pitch/roll hover
-    'foot_geometry',       # robust_bell on foot xy rel to base in heading frame (4 dim)
     'pose_match',          # robust_bell on Σ (q - ref)^2 (10-dim joint pose tracking to ref)
     'foot_slip',           # exp(-Σ ||v_xy(foot)||²)·contact_avg        contact-gated (×0 if airborne)
     'foot_rotation',       # exp(-Σ ||ω(foot)||²)·contact_avg           contact-gated (×0 if airborne)
-    'xy_drift',            # exp(-||xy - episode_init_xy||²/σ^2)       position lock
-    'joint_velocity',      # -||joint_vel||^2 / 1000                   small negative reg
-    'torque',              # -||torque||^2 / 100000                    small negative reg
     'action_smoothness',   # -||a[t] - a[t-1]||^2 / 10                 small negative reg
     'termination',         # -1 on fall (not timeout)                  large terminal penalty
 )
@@ -165,16 +160,11 @@ class V2Task(NullTask):
             float(getattr(r, 'w_base_height',       2.0)),
             float(getattr(r, 'w_upright',           2.0)),
             float(getattr(r, 'w_linear_velocity',   2.0)),
-            float(getattr(r, 'w_angular_velocity',  1.0)),
-            float(getattr(r, 'w_yaw_rate_lock',     2.0)),
+            float(getattr(r, 'w_angular_velocity',  2.0)),
             float(getattr(r, 'w_body_rate_lock',    3.0)),
-            float(getattr(r, 'w_foot_geometry',     2.0)),
             float(getattr(r, 'w_pose_match',        3.0)),
             float(getattr(r, 'w_foot_slip',         1.5)),
             float(getattr(r, 'w_foot_rotation',     1.5)),
-            float(getattr(r, 'w_xy_drift',          2.0)),
-            float(getattr(r, 'w_joint_velocity',    1.0)),
-            float(getattr(r, 'w_torque',            1.0)),
             float(getattr(r, 'w_action_smoothness', 1.0)),
             float(getattr(r, 'w_termination',      50.0)),
         ], device=self.device)
@@ -183,14 +173,11 @@ class V2Task(NullTask):
         self._upright_scale           = float(getattr(r, 'upright_scale',         0.30))
         self._linear_velocity_scale   = float(getattr(r, 'linear_velocity_scale', 0.25))
         self._angular_velocity_scale  = float(getattr(r, 'angular_velocity_scale', 0.50))
-        self._yaw_rate_lock_scale     = float(getattr(r, 'yaw_rate_lock_scale',   1.0))   # rad/s — saturates at yaw=1
+        self._angular_velocity_l2_weight = float(getattr(r, 'angular_velocity_l2_weight', 1.0))  # deep L2 floor — absorbs yaw_rate_lock role
         self._body_rate_lock_scale    = float(getattr(r, 'body_rate_lock_scale',  1.0))   # rad/s combined rp_avel
-        self._foot_geometry_scale     = float(getattr(r, 'foot_geometry_scale',   0.05))  # m (xy) / rad (yaw) per-dim
         self._pose_match_scale        = float(getattr(r, 'pose_match_scale',      1.5))   # rad on Σ(q-ref)² bell
-        self._foot_ref_state          = None  # captured on first reward() call from a clean reset env
         self._foot_slip_scale         = float(getattr(r, 'foot_slip_scale',       0.05))
         self._foot_rotation_scale     = float(getattr(r, 'foot_rotation_scale',   0.30))
-        self._xy_drift_scale          = float(getattr(r, 'xy_drift_scale',        0.20))
         self._contact_threshold       = float(getattr(r, 'contact_threshold',     5.0))
 
         # Episode-init XY for drift reward. Set in reset(); init for first rollout.
@@ -332,7 +319,7 @@ class V2Task(NullTask):
         idx = [i * self._obs_skip for i in range(self._obs_history_n)]
         return torch.cat([buf[i] for i in idx], dim=-1)
 
-    # ── reward (15 terms; see REWARD_NAMES at top for layout) ────────────
+    # ── reward (10 terms; see REWARD_NAMES at top for layout) ────────────
     # Bells use robust_bell() helper: exp(-err²/σ²) − 0.5·clip(err²/(4σ)², 0, 1).
     # Always has long-range gradient (Huber-like), no plateau beyond ±3σ.
     def reward(self) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -351,36 +338,18 @@ class V2Task(NullTask):
         yaw_err_sq = (self.base_ang_vel[:, [2]] - self.commands[:, [2]]) ** 2
         rp_avel_sq = torch.sum(self.base_ang_vel[:, :2] ** 2, dim=-1, keepdim=True)
         ang_err_sq = yaw_err_sq + rp_avel_sq * 0.3
-        r_angular_velocity = robust_bell(ang_err_sq, self._angular_velocity_scale)
+        # angular_velocity uses deep L2 floor (l2_weight=1.0) so it absorbs the
+        # yaw_rate_lock role: at large yaw_rate (>= ~0.8) the L2 cap saturates
+        # to -1.0, × w=2 = -2.0/step — matches yaw_rate_lock's L2 exactly.
+        # Bonus: bell still gives +reward near zero rate. One reward, two roles.
+        r_angular_velocity = robust_bell(ang_err_sq, self._angular_velocity_scale,
+                                         l2_weight=self._angular_velocity_l2_weight)
 
-        # L2 yaw-rate penalty: gradient exists at ANY yaw_rate (unlike bell which
-        # saturates at 0 reward beyond ~3σ). Clipped to [-1, 0] for stability.
-        yaw_rate_sq = self.base_ang_vel[:, [2]] ** 2
-        r_yaw_rate_lock = -torch.clip(yaw_rate_sq / (self._yaw_rate_lock_scale ** 2), 0.0, 1.0)
-
-        # L2 body-rate penalty (roll/pitch rate) — same trick. Without this,
+        # L2 body-rate penalty (roll/pitch rate) — gradient exists at ANY rate
+        # (unlike bell which saturates beyond ~3σ). Without this,
         # angular_velocity bell saturates at 0 for high rp_avel → no gradient → policy
         # hovers via pitch/roll oscillation.
         r_body_rate_lock = -torch.clip(rp_avel_sq / (self._body_rate_lock_scale ** 2), 0.0, 1.0)
-
-        # Foot geometry bell: constrain stance (foot xy relative to base in
-        # heading frame). Lets policy freely optimize hip_pitch/knee/ankle
-        # while keeping foot placement (hip_yaw + hip_roll) close to ref.
-        # Both foot_pos_hd and base_pos_hd are world-position rotated by
-        # heading-inverse, so the difference is foot-relative-to-base in a
-        # body-yaw-aligned frame — invariant to where each env spawns.
-        base_xy_hd = self.env.base_pos_hd[:, 0:2]
-        foot_state = torch.cat([
-            self.env.foot_pos_hd[:, 0:2] - base_xy_hd,   # L foot xy rel to base
-            self.env.foot_pos_hd[:, 3:5] - base_xy_hd,   # R foot xy rel to base
-        ], dim=-1)
-        if self._foot_ref_state is None:
-            # First call: capture ref. Average across envs to wash out the
-            # ±0.1 rad joint reset noise.
-            self._foot_ref_state = foot_state.mean(dim=0, keepdim=True).detach()
-        foot_geom_err_sq = torch.sum((foot_state - self._foot_ref_state) ** 2,
-                                      dim=-1, keepdim=True) / foot_state.shape[-1]
-        r_foot_geometry = robust_bell(foot_geom_err_sq, self._foot_geometry_scale)
 
         # Pose match: full 10-dim joint tracking toward ref. σ on Σ(q-ref)² controls
         # how tightly policy is anchored to the captured stand pose. Larger σ allows
@@ -410,14 +379,7 @@ class V2Task(NullTask):
                   torch.sum(avel_R ** 2, dim=-1) * in_contact[:, 1]).unsqueeze(-1)
         r_foot_rotation = robust_bell(rot_sq, self._foot_rotation_scale) * contact_avg
 
-        # Drift from episode start (XY only).
-        drift_sq = torch.sum((self.env.base_pos[:, :2] - self._episode_init_xy) ** 2,
-                             dim=-1, keepdim=True)
-        r_xy_drift = robust_bell(drift_sq, self._xy_drift_scale)
-
         # Small negative regularization — must not dominate positives.
-        r_joint_velocity   = -torch.sum(self.env.joint_vel ** 2, dim=-1, keepdim=True) / 1000.0
-        r_torque           = -torch.sum(self.env.torques ** 2,   dim=-1, keepdim=True) / 100000.0
         da = self.action_history[-1] - self.action_history[-2]
         r_action_smoothness = -torch.sum(da ** 2, dim=-1, keepdim=True) / 10.0
 
@@ -429,11 +391,11 @@ class V2Task(NullTask):
 
         components = torch.cat([
             r_base_height, r_upright, r_linear_velocity, r_angular_velocity,
-            r_yaw_rate_lock, r_body_rate_lock,
-            r_foot_geometry, r_pose_match,
-            r_foot_slip, r_foot_rotation, r_xy_drift,
-            r_joint_velocity, r_torque, r_action_smoothness, r_termination,
-        ], dim=1)  # [n, 15]
+            r_body_rate_lock,
+            r_pose_match,
+            r_foot_slip, r_foot_rotation,
+            r_action_smoothness, r_termination,
+        ], dim=1)  # [n, 10]
         weighted = components * self._w.unsqueeze(0)
         self._last_rew_components = weighted
         return weighted, weighted

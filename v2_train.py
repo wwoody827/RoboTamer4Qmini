@@ -1,16 +1,19 @@
 """v2_train.py — minimal trainer for V2Task walk_clean experiments.
 
 Key differences from train.py:
-  - NO sim2sim eval
   - NO separate stand-eval rollout — stand metrics computed inline from the
     training rollout itself (training cmd is always 0 for walk_clean_v2, so
     train rollout IS a stand eval). Avoids post-eval reset artifact and the
     GPU stall of a dedicated 9s rollout every 200 iter.
+  - Optional sim2sim eval (--sim2sim_interval > 0): exports ONNX + manifest
+    every N iter and runs deploy/sim2sim/evaluate.quick_eval. Logs
+    `sim2sim/*` to TB.
   - TB metrics: train rewards + per-reward components + `stand/*` per-iter
   - Simpler logging, no MIRL/Recovery hooks
 
 Usage:
-    python v2_train.py --config configs/walk_clean_v2.yaml --name v2_run1
+    python v2_train.py --config configs/walk_clean_v2.yaml --name v2_run1 \
+        --sim2sim_interval 200
 """
 
 import collections
@@ -33,6 +36,7 @@ from rl.policy import load_actor, load_critic
 from rl.alg import PPO
 from config.loader import load_config, CfgNode, config_to_dict, save_config
 from utils.common import clear_dir
+from deploy.manifest import build_manifest, save_manifest
 from isaacgym.torch_utils import *  # required: imports get_axis_params, to_torch, etc.
 
 
@@ -83,6 +87,22 @@ def main():
         'num_critic_obs':   len(task.critic_observation()[0]),
     })
     save_config(CfgNode(cfg_dict), join(model_dir, 'cfg.yaml'))
+
+    # sim2sim eval setup (manifest-based, runs every --sim2sim_interval iters)
+    sim2sim_cfg = None
+    sim2sim_interval = getattr(args, 'sim2sim_interval', 0) or 0
+    _quick_eval = None
+    _manifest = None
+    if sim2sim_interval > 0:
+        import sys as _sys
+        _sim2sim_dir = join(os.path.dirname(os.path.abspath(__file__)), 'deploy', 'sim2sim')
+        if _sim2sim_dir not in _sys.path:
+            _sys.path.insert(0, _sim2sim_dir)
+        from sim2sim import manifest_to_sim2sim_cfg
+        from evaluate import quick_eval_v2 as _quick_eval
+        _manifest = build_manifest(cfg_dict)
+        sim2sim_cfg = manifest_to_sim2sim_cfg(_manifest, policy_path='<will be set per eval>')
+        print(f'[sim2sim] eval enabled every {sim2sim_interval} iters (manifest-based)')
 
     # Build PPO
     actor = load_actor(cfg_dict['policy'], device).train()
@@ -213,6 +233,34 @@ def main():
                 'critic': alg.critic.state_dict(),
                 'iteration': it,
             }, join(all_dir, f'policy_{it}.pt'))
+
+        # sim2sim eval — export ONNX + run MuJoCo quick_eval, log to TB.
+        if sim2sim_interval > 0 and it % sim2sim_interval == 0 and sim2sim_cfg is not None:
+            try:
+                _t0 = time.time()
+                _deploy_dir = join(exp_dir, 'deploy')
+                os.makedirs(_deploy_dir, exist_ok=True)
+                _onnx_path = join(_deploy_dir, f'policy_{it}.onnx')
+                alg.actor.eval()
+                _dummy = torch.zeros(1, task.num_observations, device='cpu')
+                torch.onnx.export(alg.actor.cpu(), _dummy, _onnx_path,
+                                  opset_version=12, input_names=['input'], output_names=['output'],
+                                  verbose=False)
+                alg.actor.to(device).train()
+                save_manifest(_manifest, join(_deploy_dir, f'policy_{it}_manifest.yaml'))
+                sim2sim_cfg['policy_path'] = _onnx_path
+                _metrics = _quick_eval(_onnx_path, sim2sim_cfg)
+                for k, v in _metrics.items():
+                    if not (isinstance(v, float) and (v != v)):  # skip nan
+                        writer.add_scalar(k, v, it)
+                _surv = '  '.join(f'fr{k.split("fr")[1]}={v:.1f}s'
+                                  for k, v in _metrics.items() if 'survive_time' in k)
+                _drift = _metrics.get('sim2sim/xy_drift_final', float('nan'))
+                _pitch = _metrics.get('sim2sim/pitch_rms_deg', float('nan'))
+                _q = _metrics.get('sim2sim/quality_score', float('nan'))
+                print(f'[sim2sim@{it}] {_surv}  drift={_drift:.2f}m  pitch={_pitch:.1f}°  q={_q:.2f}  ({time.time() - _t0:.0f}s)', flush=True)
+            except Exception as _e:
+                print(f'[sim2sim@{it}] eval failed: {_e}', flush=True)
 
         if it % 50 == 0 and rew_buf:
             print(f'[iter {it}] rew={np.mean(rew_buf):6.2f} '
