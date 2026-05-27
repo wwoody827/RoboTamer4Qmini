@@ -1,0 +1,19 @@
+# walk_rl_fwd_simple — minimal "stand + forward walk only" version of
+# walk_rl_v34 (the proven recipe). 50% stand + 50% forward walk via the
+# pure_fwd_stand regime; everything else identical to the deployment-candidate
+# recipe.
+#
+# Usage:
+#   python train.py --config configs/walk_rl_fwd_simple.yaml \
+#       --name rl_fwd_simple_v1 --sim2sim_interval 500 --num_envs 4096
+
+_base: walk_rl.yaml
+
+command:
+  # pure_fwd_stand: 50% cmd_vx=0 (stand), 50% cmd_vx=vx_hi=0.5 (walk).
+  # vy and yaw are forced to 0 by the regime handler.
+  regime: pure_fwd_stand
+  lin_vel_x_range:   [-0.0, 0.5]    # vx_hi = 0.5 → forward walk command
+  lin_vel_y_range:   [0.0, 0.0]
+  ang_vel_yaw_range: [0.0, 0.0]
+  resampling_time:   10.0
